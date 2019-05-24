@@ -14,11 +14,11 @@ in
     taskbitica = drv;
     taskbitica-shell = overriddenPackages.shellFor {
       packages = p: [drv];
-      buildInputs = with pkgs; with haskellPackages; [
+      buildInputs = with overriddenPackages; [
         cabal-install
         ghcid
         stylish-haskell
-        hindent
+        hlint
       ];
     };
   }

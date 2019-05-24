@@ -29,6 +29,7 @@ executable taskbitica
                      , process
                      , bytestring
                      , utf8-string
+                     , mtl
                      , unordered-containers
                      , uuid
                      , newtype-generics

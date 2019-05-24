@@ -4,7 +4,9 @@
 
 module Web where
 
+import           Control.Concurrent   (threadDelay)
 import           Control.Exception    (catch)
+import           Control.Monad        (void)
 
 import           Data.Aeson           (parseJSON)
 import           Data.Aeson.Types     (FromJSON, Value (Null), parseEither)
@@ -53,19 +55,20 @@ habiticaHeaders textUUID textApiKey =
 runHabiticaReq ::
        FromJSON a => Req (Either String (HabiticaResponse a)) -> IO (HabiticaResponse a)
 runHabiticaReq req = do
-    catch (either ParseError id <$> Req.runReq reqConf req) $ return . HttpException
+    threadDelay 1000000
     -- Throw errors out the window for now
     -- TODO: Actually handle them properly
+    catch (either ParseError id <$> Req.runReq reqConf req) $ return . HttpException
   where
     reqConf = Req.defaultHttpConfig {Req.httpConfigCheckResponse = \_ _ _ -> Nothing}
 
 -- TODO: Temp runner just to get things working
 runHabiticaReq' :: Req Value -> IO ()
 runHabiticaReq' req = do
-    catch (Req.runReq reqConf req) (\(_ :: Req.HttpException) -> return Null) >>
-        return ()
+    threadDelay 1000000
     -- Throw errors out the window for now
     -- TODO: Actually handle them properly
+    void $ catch (Req.runReq reqConf req) (\(_ :: Req.HttpException) -> return Null)
   where
     reqConf = Req.defaultHttpConfig {Req.httpConfigCheckResponse = \_ _ _ -> Nothing}
 
