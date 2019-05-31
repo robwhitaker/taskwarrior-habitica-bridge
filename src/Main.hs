@@ -101,7 +101,12 @@ modifyTaskwarriorTask ::
     -> TaskwarriorTask
     -> ExceptT String IO TaskwarriorTask
 modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask) =
-    case (taskStatus oldTask, taskStatus newTask) of
+    -- Since the equality check only checks fields shared between Taskwarrior and Habitica,
+    -- changing Taskwarrior-only fields will simply return the modified task to Taskwarrior
+    -- without an unnecessary request to Habitica's API.
+    if oldTask == newTask then
+        return twTask
+    else case (taskStatus oldTask, taskStatus newTask) of
         -- The task remains deleted and doesn't exist on Habitica,
         -- so return the task unchanged
         (Deleted, Deleted) -> return twTask

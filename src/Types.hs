@@ -32,16 +32,17 @@ data Task = Task
     , rawJson        :: Value
     } deriving (Show)
 
-instance Eq Task
+instance Eq Task where
     -- The Eq instance ignores the modified field as *when* the tasks changed
-    -- is inconsequential to comparing the *content* of the task.
-                                                                  where
+    -- is inconsequential to comparing the *content* of the task. It also ignores
+    -- the rawJson as that's only stored for the sake of not losing unparsed fields.
     (==) t1 t2 =
         (taskHabiticaId t1 == taskHabiticaId t2) &&
         (taskType t1 == taskType t2) &&
         (taskText t1 == taskText t2) &&
         (taskDifficulty t1 == taskDifficulty t2) &&
-        (taskStatus t1 == taskStatus t2) && (taskDue t1 == taskDue t2)
+        (taskStatus t1 == taskStatus t2) &&
+        (taskDue t1 == taskDue t2)
 
 data TaskDifficulty
     = Trivial
