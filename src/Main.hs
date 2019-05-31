@@ -211,7 +211,7 @@ main = do
     case args of
         ("sync":_) -> sync headers
         ("add":_) -> addHook headers
-        ("update":_) -> updateHook headers
+        ("modify":_) -> modifyHook headers
         _ -> do
             putStrLn "You must provide a valid action: sync, add, modify"
             exitFailure
@@ -233,8 +233,8 @@ addHook headers =
         newTask <- pushTaskwarriorTask headers task
         liftIO $ putStrLn $ B.toString $ encode newTask
 
-updateHook :: HabiticaHeaders -> IO ()
-updateHook headers =
+modifyHook :: HabiticaHeaders -> IO ()
+modifyHook headers =
     runAndFailOnError $ do
         (oldTaskJson, newTaskJson) <- liftIO $ (,) <$> getLine <*> getLine
         oldTask <- liftEither $ eitherDecode (fromString oldTaskJson)
