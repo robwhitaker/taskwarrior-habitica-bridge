@@ -89,7 +89,7 @@ pushTaskwarriorTask ::
 pushTaskwarriorTask headers taskwarriorTask@(TaskwarriorTask twTask) = do
     let htask@(HabiticaTask task) = toHabiticaTask taskwarriorTask
     let req = habiticaCreateOrUpdateRequest headers htask
-    res <- liftIO $ runHabiticaReq req >>= betterResponseHandle
+    res <- liftIO $ runHabiticaReq req >>= fmap (fmap resBody) . betterResponseHandle
     (HabiticaTask Task{taskHabiticaId}) <- liftEither res
     return $ TaskwarriorTask twTask {taskHabiticaId = taskHabiticaId}
 
@@ -120,28 +120,28 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
                 "Attempt to push task to Habitica resulted in a local task with no UUID."
                 taskHabiticaId
             when (newStatus == Completed) $
-                liftIO (runHabiticaReq' (habiticaScoreTask headers hId Up))
+                void $ liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
             return newTwTask
 
         -- When going from Completed to Pending, "uncheck" the task
         -- on Habitica.
         (Completed, Pending) -> do
             hId <- getId
-            liftIO $ runHabiticaReq' (habiticaScoreTask headers hId Down)
+            void $ liftIO $ runHabiticaReq (habiticaScoreTask headers hId Down)
             return twTask
 
         -- When going from Pending to Completed, "check" the task
         -- on Habitica.
         (Pending, Completed) -> do
             hId <- getId
-            liftIO $ runHabiticaReq' (habiticaScoreTask headers hId Up)
+            void $ liftIO $ runHabiticaReq (habiticaScoreTask headers hId Up)
             return twTask
 
         -- If the task was deleted (and wasn't already deleted, checked for above)
         -- delete the task on Habitica.
         (_, Deleted) -> do
             hId <- getId
-            liftIO $ runHabiticaReq' (habiticaDeleteTask headers hId)
+            liftIO $ runHabiticaReq (habiticaDeleteTask headers hId)
             -- Unset the Habitica ID since the task no longer exists
             return $ TaskwarriorTask newTask{taskHabiticaId = Nothing}
 
@@ -156,7 +156,7 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
         "Task has no Habitica ID and cannot be updated."
         (taskHabiticaId newTask)
 
-betterResponseHandle :: HabiticaResponse a -> IO (Either String a)
+betterResponseHandle :: HabiticaResponse a -> IO (Either String (ResponseData a))
 betterResponseHandle res =
     case res of
         HttpException e ->
@@ -177,7 +177,7 @@ habiticaResponseHandle (ErrorResponse errText errMessage) =
     error $ T.unpack $ errText <> ": " <> errMessage
 habiticaResponseHandle (ParseError errText) =
     error $ "Something went wrong while parsing the response from Habitica: " <> errText
-habiticaResponseHandle (DataResponse response) = return response
+habiticaResponseHandle (DataResponse response) = return (resBody response)
 
 addToHabitica :: HabiticaHeaders -> TaskwarriorTask -> IO ()
 addToHabitica headers twTask@(TaskwarriorTask task) = do
@@ -203,11 +203,11 @@ updateHabitica headers hTask@(HabiticaTask task) hasStatusChange = do
                         (taskHabiticaId task)
             case taskStatus task of
                 Pending ->
-                    runHabiticaReq' (habiticaScoreTask headers taskId Down)
+                    void $ runHabiticaReq (habiticaScoreTask headers taskId Down)
                 Completed ->
-                    runHabiticaReq' (habiticaScoreTask headers taskId Up)
+                    void $ runHabiticaReq (habiticaScoreTask headers taskId Up)
                 Deleted ->
-                    runHabiticaReq' (habiticaDeleteTask headers taskId)
+                    void $ runHabiticaReq (habiticaDeleteTask headers taskId)
 
 main :: IO ()
 main = do

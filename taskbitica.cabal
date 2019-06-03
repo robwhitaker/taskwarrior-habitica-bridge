@@ -30,6 +30,7 @@ executable taskbitica
                      , bytestring
                      , utf8-string
                      , mtl
+                     , transformers
                      , unordered-containers
                      , uuid
                      , newtype-generics

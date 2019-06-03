@@ -5,20 +5,25 @@ module Types where
 
 import           GHC.Generics
 
-import           Control.Newtype.Generics (Newtype)
-import qualified Control.Newtype.Generics as NT
+import           Control.Applicative       (empty, (<|>))
+
+import           Control.Monad.Trans.Class (lift)
+import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
+
+import           Control.Newtype.Generics  (Newtype)
+import qualified Control.Newtype.Generics  as NT
 
 import           Data.Aeson
 import           Data.Aeson.Types
-import qualified Data.HashMap.Strict      as HM
-import           Data.Maybe               (fromJust)
-import           Data.Text                (Text)
-import qualified Data.Text                as T
-import           Data.Time                (UTCTime)
-import qualified Data.Time.Format         as Time
-import qualified Data.UUID                as UUID
+import qualified Data.HashMap.Strict       as HM
+import           Data.Maybe                (fromJust, fromMaybe, isJust)
+import           Data.Text                 (Text)
+import qualified Data.Text                 as T
+import           Data.Time                 (UTCTime)
+import qualified Data.Time.Format          as Time
+import qualified Data.UUID                 as UUID
 
-import           Network.HTTP.Req         (HttpException)
+import           Network.HTTP.Req          (HttpException)
 
 {- TASK TYPE -}
 data Task = Task
@@ -188,7 +193,6 @@ instance FromJSON TaskwarriorTask where
             (o .: "modified" >>= textToTime taskwarriorTimeFormat) <*>
             return (Object o)
 
--- TOJSON difficulty:
 instance ToJSON TaskwarriorTask where
     toJSON (TaskwarriorTask task)
         -- Taskwarrior's "import" functionality removes all fields that
@@ -210,6 +214,40 @@ instance ToJSON TaskwarriorTask where
         --       if the Value isn't an Object, though that can only
         --       happen if Tasks are constructed manually.
         (Object oldObj) = rawJson task
+
+data HabiticaUserStats = HabiticaUserStats
+    { statsHp  :: Double
+    , statsMp  :: Double
+    , statsExp :: Double
+    , statsGp  :: Double
+    , statsLvl :: Int
+    } deriving (Show)
+
+instance FromJSON HabiticaUserStats where
+    parseJSON = withObject "Habitica user stats" $ \o -> do
+        stats <- fromMaybe o <$> o .:? "stats"
+        HabiticaUserStats <$>
+            stats .: "hp" <*>
+            stats .: "mp" <*>
+            stats .: "exp" <*>
+            stats .: "gp" <*>
+            stats .: "lvl"
+
+newtype ItemDrop = ItemDrop Text
+  deriving (Show)
+
+instance FromJSON ItemDrop where
+    parseJSON = withObject "item drop" $ \o -> do
+        dialog <- runMaybeT $
+            maybeField "_tmp" o
+                >>= maybeField "drop"
+                >>= maybeField "dialog"
+        maybe
+            empty
+            (return . ItemDrop)
+            dialog
+      where
+        maybeField txt obj = MaybeT (obj .:? txt)
 
 -- These don't really belong here, but they are needed for encoding/decoding time
 habiticaTimeFormat :: String
@@ -234,21 +272,44 @@ parseUTCTime format = Time.parseTimeM True Time.defaultTimeLocale format . T.unp
 -
 -  Types for working with web requests
 -}
+
+data ResponseData a = ResponseData
+    { resBody      :: a
+    , resUserStats :: Maybe HabiticaUserStats
+    , resItemDrop  :: Maybe ItemDrop
+    } deriving (Show)
+
+instance Functor ResponseData where
+    fmap f resData = resData { resBody = f (resBody resData) }
+
 data HabiticaResponse a
-    = DataResponse a
+    = DataResponse (ResponseData a)
     | ErrorResponse { err        :: Text
                     , errMessage :: Text }
     | ParseError String
     | HttpException HttpException
     deriving (Show)
 
+instance Functor HabiticaResponse where
+    fmap f (DataResponse val)  = DataResponse (fmap f val)
+    fmap _ (ErrorResponse e m) = ErrorResponse e m
+    fmap _ (ParseError str)    = ParseError str
+    fmap _ (HttpException e)   = HttpException e
+
 instance (FromJSON a) => FromJSON (HabiticaResponse a) where
     parseJSON =
         withObject "habitica response" $ \o -> do
             success <- o .: "success"
             if success
-                then DataResponse <$> o .: "data"
+                then fmap DataResponse $ ResponseData <$>
+                    o .: "data" <*>
+                    o `maybeParse` "data" <*>
+                    o `maybeParse` "data"
                 else ErrorResponse <$> o .: "error" <*> o .: "message"
+      where
+        maybeParse :: FromJSON a => Object -> Text -> Parser (Maybe a)
+        maybeParse obj txt =
+            obj .: txt >>= \json -> parseJSON json <|> return Nothing
 
 {- CHANGE TYPES
 -

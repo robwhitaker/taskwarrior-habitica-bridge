@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies        #-}
 
 module Web where
 
@@ -17,8 +18,9 @@ import           Data.Text            (Text)
 import qualified Data.Text            as T
 import qualified Data.UUID            as UUID
 
-import           Network.HTTP.Req     (Option, Req, ReqBodyJson (..),
-                                       Scheme (Https), Url, (/:), (=:))
+import           Network.HTTP.Req     (HttpResponse (..), Option, Req,
+                                       ReqBodyJson (..), Scheme (Https), Url,
+                                       (/:), (=:))
 import qualified Network.HTTP.Req     as Req
 
 import           Types
@@ -26,6 +28,12 @@ import           Types
 {- ENDPOINT DEFINITIONS  -}
 habiticaApiV3 :: Url 'Https
 habiticaApiV3 = Req.https "habitica.com" /: "api" /: "v3"
+
+habiticaApiV4 :: Url 'Https
+habiticaApiV4 = Req.https "habitica.com" /: "api" /: "v4"
+
+userEndpoint :: Url 'Https
+userEndpoint = habiticaApiV4 /: "user"
 
 tasksEndpoint :: Url 'Https
 tasksEndpoint = habiticaApiV3 /: "tasks" /: "user"
@@ -35,8 +43,7 @@ taskEndpoint (UUID taskId) = habiticaApiV3 /: "tasks" /: UUID.toText taskId
 
 scoreEndpoint :: UUID -> ScoreDirection -> Url 'Https
 scoreEndpoint (UUID taskId) dir =
-    habiticaApiV3 /: "tasks" /: UUID.toText taskId /: "score" /:
-    (T.toLower $ T.pack $ show dir)
+    habiticaApiV3 /: "tasks" /: UUID.toText taskId /: "score" /: T.toLower (T.pack $ show dir)
 
 {- HELPER FUNCTIONS -}
 newtype HabiticaHeaders =
@@ -44,81 +51,77 @@ newtype HabiticaHeaders =
 
 habiticaHeaders :: Text -> Text -> Maybe HabiticaHeaders
 habiticaHeaders textUUID textApiKey =
-    (\uuid apiKey ->
-         HabiticaHeaders $
-         (Req.header "x-api-user" $ B.toStrict $ fromString $ UUID.toString $ uuid) <>
-         (Req.header "x-api-key" $ B.toStrict $ fromString $ UUID.toString apiKey)) <$>
-    UUID.fromText textUUID <*>
-    UUID.fromText textApiKey
+    mkHeaders <$> UUID.fromText textUUID <*> UUID.fromText textApiKey
+  where
+    mkHeaders uuid apiKey =
+        HabiticaHeaders $ mconcat
+            [ Req.header "x-api-user" (B.toStrict $ fromString $ UUID.toString uuid)
+            , Req.header "x-api-key" (B.toStrict $ fromString $ UUID.toString apiKey)
+            ]
+
+-- Type signature for this is weird, so let GHC figure it out
+toHabiticaRequest f req = do
+    r <- parseEither parseJSON . Req.responseBody <$> req
+    return (fmap (fmap f) r)
+
+ignoreValue :: Value -> ()
+ignoreValue = const ()
+
+{- TYPE ALIASES -}
+
+type HabiticaRequest a = Req (Either String (HabiticaResponse a))
 
 {- RUNNING REQUESTS -}
-runHabiticaReq ::
-       FromJSON a => Req (Either String (HabiticaResponse a)) -> IO (HabiticaResponse a)
+runHabiticaReq :: FromJSON a => HabiticaRequest a -> IO (HabiticaResponse a)
 runHabiticaReq req = do
+    -- Add a pause before Habitica requests so the server doesn't choke when more than one
+    -- request happens
     threadDelay 1000000
-    -- Throw errors out the window for now
-    -- TODO: Actually handle them properly
+    -- Do some simple error handling to prevent the user's API key from getting spit into
+    -- the terminal on a failure
     catch (either ParseError id <$> Req.runReq reqConf req) $ return . HttpException
   where
     reqConf = Req.defaultHttpConfig {Req.httpConfigCheckResponse = \_ _ _ -> Nothing}
 
--- TODO: Temp runner just to get things working
-runHabiticaReq' :: Req Value -> IO ()
-runHabiticaReq' req = do
-    threadDelay 1000000
-    -- Throw errors out the window for now
-    -- TODO: Actually handle them properly
-    void $ catch (Req.runReq reqConf req) (\(_ :: Req.HttpException) -> return Null)
-  where
-    reqConf = Req.defaultHttpConfig {Req.httpConfigCheckResponse = \_ _ _ -> Nothing}
-
 {- HABITICA REQUESTS -}
-habiticaCreateOrUpdateRequest ::
-       HabiticaHeaders
-    -> HabiticaTask
-    -> Req (Either String (HabiticaResponse HabiticaTask))
+habiticaCreateOrUpdateRequest :: HabiticaHeaders -> HabiticaTask -> HabiticaRequest HabiticaTask
 habiticaCreateOrUpdateRequest (HabiticaHeaders headers) habiticaTask@(HabiticaTask task) =
-    let mkReq =
-            case taskHabiticaId task of
-                Just id -> Req.req Req.PUT (taskEndpoint id)
-                Nothing -> Req.req Req.POST tasksEndpoint
-     in mkReq (ReqBodyJson habiticaTask) Req.jsonResponse headers >>=
-        return . parseEither parseJSON . Req.responseBody
+    toHabiticaRequest id $
+        mkReq (ReqBodyJson habiticaTask) Req.jsonResponse headers
+  where
+    mkReq =
+        case taskHabiticaId task of
+            Just id -> Req.req Req.PUT (taskEndpoint id)
+            Nothing -> Req.req Req.POST tasksEndpoint
 
-habiticaGetTasks ::
-       HabiticaHeaders
-    -> Maybe Text
-    -> Req (Either String (HabiticaResponse [HabiticaTask]))
+habiticaGetTasks :: HabiticaHeaders -> Maybe Text -> HabiticaRequest [HabiticaTask]
 habiticaGetTasks (HabiticaHeaders headers) maybeQueryParam =
-    Req.req
-        Req.GET
-        tasksEndpoint
-        Req.NoReqBody
-        Req.jsonResponse
-        (case maybeQueryParam of
-             Nothing -> headers
-             _       -> (headers <> Req.queryParam "type" maybeQueryParam)) >>=
-    return . parseEither parseJSON . Req.responseBody
+    toHabiticaRequest id $
+        Req.req Req.GET tasksEndpoint Req.NoReqBody Req.jsonResponse
+            (maybe headers ((headers <>) . Req.queryParam "type" . Just) maybeQueryParam)
 
-habiticaGetTask ::
-       HabiticaHeaders -> UUID -> Req (Either String (HabiticaResponse HabiticaTask))
+habiticaGetTask :: HabiticaHeaders -> UUID -> HabiticaRequest HabiticaTask
 habiticaGetTask (HabiticaHeaders headers) uuid =
-    Req.req Req.GET (taskEndpoint uuid) Req.NoReqBody Req.jsonResponse headers >>=
-    return . parseEither parseJSON . Req.responseBody
+    toHabiticaRequest id $
+        Req.req Req.GET (taskEndpoint uuid) Req.NoReqBody Req.jsonResponse headers
 
--- TODO: Better return value?
-habiticaDeleteTask :: HabiticaHeaders -> UUID -> Req Value
+
+habiticaDeleteTask :: HabiticaHeaders -> UUID -> HabiticaRequest ()
 habiticaDeleteTask (HabiticaHeaders headers) uuid =
-    Req.req Req.DELETE (taskEndpoint uuid) Req.NoReqBody Req.jsonResponse headers >>=
-    return . Req.responseBody
+    toHabiticaRequest ignoreValue $
+        Req.req Req.DELETE (taskEndpoint uuid) Req.NoReqBody Req.jsonResponse headers
 
 data ScoreDirection
     = Up
     | Down
     deriving (Show, Eq)
 
--- TODO: Better return value?
-habiticaScoreTask :: HabiticaHeaders -> UUID -> ScoreDirection -> Req Value
+habiticaScoreTask :: HabiticaHeaders -> UUID -> ScoreDirection -> HabiticaRequest ()
 habiticaScoreTask (HabiticaHeaders headers) uuid dir =
-    Req.req Req.POST (scoreEndpoint uuid dir) Req.NoReqBody Req.jsonResponse headers >>=
-    return . Req.responseBody
+    toHabiticaRequest ignoreValue $
+        Req.req Req.POST (scoreEndpoint uuid dir) Req.NoReqBody Req.jsonResponse headers
+
+habiticaGetUserStats :: HabiticaHeaders -> HabiticaRequest ()
+habiticaGetUserStats (HabiticaHeaders headers) =
+    toHabiticaRequest ignoreValue $
+        Req.req Req.GET userEndpoint Req.NoReqBody Req.jsonResponse headers
