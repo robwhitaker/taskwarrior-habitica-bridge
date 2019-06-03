@@ -84,58 +84,76 @@ getHabiticaTasks headers = do
     -- We don't care about rewards or habits
     return $ todos <> dailies <> completed
 
-pushTaskwarriorTask ::
-       HabiticaHeaders -> TaskwarriorTask -> ExceptT String IO TaskwarriorTask
+pushTaskwarriorTask
+    :: HabiticaHeaders
+    -> TaskwarriorTask
+    -> ExceptT String IO (TaskwarriorTask, Maybe HabiticaUserStats, Maybe ItemDrop)
 pushTaskwarriorTask headers taskwarriorTask@(TaskwarriorTask twTask) = do
     let htask@(HabiticaTask task) = toHabiticaTask taskwarriorTask
     let req = habiticaCreateOrUpdateRequest headers htask
-    res <- liftIO $ runHabiticaReq req >>= fmap (fmap resBody) . betterResponseHandle
-    (HabiticaTask Task{taskHabiticaId}) <- liftEither res
-    return $ TaskwarriorTask twTask {taskHabiticaId = taskHabiticaId}
+    res <- liftIO $ runHabiticaReq req
+        >>= betterResponseHandle
+    (ResponseData
+        (HabiticaTask Task{taskHabiticaId})
+        maybeNewStats
+        maybeItemDrop) <- liftEither res
+    return
+        (TaskwarriorTask twTask {taskHabiticaId = taskHabiticaId}
+        , maybeNewStats
+        , maybeItemDrop
+        )
 
 -- TODO: rename this to something better
--- TODO: The runHabiticaReq' requests below are completely unchecked for success vs failure
 modifyTaskwarriorTask ::
        HabiticaHeaders
     -> TaskwarriorTask
     -> TaskwarriorTask
-    -> ExceptT String IO TaskwarriorTask
+    -> ExceptT String IO (TaskwarriorTask, Maybe HabiticaUserStats, Maybe ItemDrop)
 modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask) =
     -- Since the equality check only checks fields shared between Taskwarrior and Habitica,
     -- changing Taskwarrior-only fields will simply return the modified task to Taskwarrior
     -- without an unnecessary request to Habitica's API.
     if oldTask == newTask then
-        return twTask
+        return (twTask, Nothing, Nothing)
     else case (taskStatus oldTask, taskStatus newTask) of
         -- The task remains deleted and doesn't exist on Habitica,
         -- so return the task unchanged
-        (Deleted, Deleted) -> return twTask
+        (Deleted, Deleted) -> return (twTask, Nothing, Nothing)
 
         -- A previously deleted task is being brought back on the Taskwarrior
         -- side, so a new Habitica task must be created since we can't recover
         -- a deleted Habitica task
         (Deleted, newStatus) -> do
-            newTwTask@(TaskwarriorTask Task{taskHabiticaId}) <- pushTaskwarriorTask headers twTask
+            -- Ignore the stats and drops as we are creating a new task so they are irrelevant
+            (newTwTask@(TaskwarriorTask Task{taskHabiticaId}), _, _) <- pushTaskwarriorTask headers twTask
             hId <- requireHabiticaId
                 "Attempt to push task to Habitica resulted in a local task with no UUID."
                 taskHabiticaId
-            when (newStatus == Completed) $
-                void $ liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
-            return newTwTask
+            if newStatus == Completed then do
+                res <- liftIO $ runHabiticaReq (habiticaScoreTask headers hId Up)
+                    >>= betterResponseHandle
+                (ResponseData _ maybeNewStats maybeItemDrop) <- liftEither res
+                return (newTwTask, maybeNewStats, maybeItemDrop)
+            else
+                return (newTwTask, Nothing, Nothing)
 
         -- When going from Completed to Pending, "uncheck" the task
         -- on Habitica.
         (Completed, Pending) -> do
             hId <- getId
-            void $ liftIO $ runHabiticaReq (habiticaScoreTask headers hId Down)
-            return twTask
+            res <- liftIO $ runHabiticaReq (habiticaScoreTask headers hId Down)
+                >>= betterResponseHandle
+            (ResponseData _ maybeNewStats maybeItemDrop) <- liftEither res
+            return (twTask, maybeNewStats, maybeItemDrop)
 
         -- When going from Pending to Completed, "check" the task
         -- on Habitica.
         (Pending, Completed) -> do
             hId <- getId
-            void $ liftIO $ runHabiticaReq (habiticaScoreTask headers hId Up)
-            return twTask
+            res <- liftIO $ runHabiticaReq (habiticaScoreTask headers hId Up)
+                >>= betterResponseHandle
+            (ResponseData _ maybeNewStats maybeItemDrop) <- liftEither res
+            return (twTask, maybeNewStats, maybeItemDrop)
 
         -- If the task was deleted (and wasn't already deleted, checked for above)
         -- delete the task on Habitica.
@@ -143,10 +161,16 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
             hId <- getId
             liftIO $ runHabiticaReq (habiticaDeleteTask headers hId)
             -- Unset the Habitica ID since the task no longer exists
-            return $ TaskwarriorTask newTask{taskHabiticaId = Nothing}
+            return
+                (TaskwarriorTask newTask{taskHabiticaId = Nothing}
+                , Nothing
+                , Nothing
+                )
 
         -- The task status didn't change so just update the details.
-        (_, _) -> pushTaskwarriorTask headers twTask
+        (_, _) -> do
+            (newTwTask, _, _) <- pushTaskwarriorTask headers twTask
+            return (newTwTask, Nothing, Nothing)
   where
     requireHabiticaId :: Monad m => String -> Maybe UUID -> ExceptT String m UUID
     requireHabiticaId errMsg = maybe (throwError errMsg) return
@@ -230,12 +254,24 @@ runAndFailOnError m = do
             exitFailure
         Right val -> return val
 
+fetchStats :: HabiticaHeaders -> ExceptT String IO HabiticaUserStats
+fetchStats headers = do
+    userStatsEither <- liftIO $ runHabiticaReq (habiticaGetUserStats headers)
+        >>= betterResponseHandle
+    (ResponseData _ maybeStats _) <- liftEither userStatsEither
+    maybe
+        (throwError "Unable to fetch stats for the user.")
+        return
+        maybeStats
+
 addHook :: HabiticaHeaders -> IO ()
 addHook headers =
     runAndFailOnError $ do
         taskJson <- liftIO getLine
         task <- liftEither $ eitherDecode (fromString taskJson)
-        newTask <- pushTaskwarriorTask headers task
+        oldUserStats <- fetchStats headers
+        -- Stats shouldn't change on adding a task, so ignore them
+        (newTask, _, _) <- pushTaskwarriorTask headers task
         liftIO $ putStrLn $ B.toString $ encode newTask
 
 modifyHook :: HabiticaHeaders -> IO ()
@@ -244,7 +280,17 @@ modifyHook headers =
         (oldTaskJson, newTaskJson) <- liftIO $ (,) <$> getLine <*> getLine
         oldTask <- liftEither $ eitherDecode (fromString oldTaskJson)
         newTask <- liftEither $ eitherDecode (fromString newTaskJson)
-        newerTask <- modifyTaskwarriorTask headers oldTask newTask
+        oldUserStats <- fetchStats headers
+        (newerTask, maybeStats, maybeDrop) <- modifyTaskwarriorTask headers oldTask newTask
+
+        case maybeStats of
+            Nothing -> return ()
+            Just newStats -> liftIO $ mapM_ putStrLn (getUserStatDiffs oldUserStats newStats)
+
+        case maybeDrop of
+            Nothing -> return ()
+            Just (ItemDrop itemDropMsg) -> liftIO $ putStrLn "" >> putStrLn (T.unpack itemDropMsg)
+
         liftIO $ putStrLn $ B.toString $ encode newerTask
 
 sync :: HabiticaHeaders -> IO ()
@@ -302,3 +348,38 @@ sync headers = do
             Update (UpdateHabitica habiticaTask hasStatusChange) ->
                 updateHabitica headers habiticaTask hasStatusChange)
         changes
+
+
+getUserStatDiffs :: HabiticaUserStats -> HabiticaUserStats -> [String]
+getUserStatDiffs old new
+    | lvlDiff /= 0 =
+        [ if lvlDiff > 0 then
+            "You leveled up! You are now level " <> show (statsLvl new) <> "!"
+          else
+            "You lost a level. You are now level " <> show (statsLvl new) <> "."
+        , mkDiffText "hp" statsHp
+        , mkDiffText "mp" statsMp
+        , mkDiffText "gold" statsGp
+        ]
+    | otherwise =
+        [ mkDiffText "hp" statsHp
+        , mkDiffText "mp" statsMp
+        , mkDiffText "gold" statsGp
+        , mkDiffText "exp" statsExp
+        ]
+  where
+    lvlDiff = statsLvl new - statsLvl old
+
+    mkDiffText field getter
+        | diff == 0 = "You have " <> prettyShowField new <> " " <> field <> "."
+        | otherwise =
+            let (dir, punc) = if diff > 0 then ("gained", "!") else ("lost", ".")
+                diffVal = prettyShow (abs diff)
+            in mconcat
+                [ "You ", dir, " ", diffVal, " ", field, punc
+                , " (current ", field, ": ", prettyShowField new, ")"
+                ]
+      where diff = getter new - getter old
+            rounded n = fromIntegral (round (n * 100)) / 100
+            prettyShow = show . rounded
+            prettyShowField = prettyShow . getter
