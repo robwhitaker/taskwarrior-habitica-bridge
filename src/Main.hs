@@ -270,7 +270,6 @@ addHook headers =
     runAndFailOnError $ do
         taskJson <- liftIO getLine
         task <- liftEither $ eitherDecode (fromString taskJson)
-        oldUserStats <- fetchStats headers
         -- Stats shouldn't change on adding a task, so ignore them
         (newTask, _, _) <- pushTaskwarriorTask headers task
         liftIO $ putStrLn $ B.toString $ encode newTask
