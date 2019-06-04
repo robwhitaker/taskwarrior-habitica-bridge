@@ -40,7 +40,8 @@ twCmd cmd = twCmd' cmd ""
 -- Taskwarrior command with STDIN
 twCmd' :: [String] -> String -> (String -> a) -> IO a
 twCmd' cmd stdin f =
-    (\(_, result, _) -> f result) <$> Process.readProcessWithExitCode "task" cmd stdin
+    (\(_, result, _) -> f result)
+        <$> Process.readProcessWithExitCode "task" ("rc.hooks=off" : cmd) stdin
 
 twGet :: String -> IO Text
 twGet str = twCmd ["_get", str] (T.strip . T.pack)
