@@ -85,24 +85,13 @@ getHabiticaTasks headers = do
     -- We don't care about rewards or habits
     return $ todos <> dailies <> completed
 
-pushTaskwarriorTask
-    :: HabiticaHeaders
-    -> TaskwarriorTask
-    -> ExceptT String IO (TaskwarriorTask, Maybe HabiticaUserStats, Maybe ItemDrop)
+pushTaskwarriorTask :: HabiticaHeaders -> TaskwarriorTask -> ExceptT String IO TaskwarriorTask
 pushTaskwarriorTask headers taskwarriorTask@(TaskwarriorTask twTask) = do
     let htask@(HabiticaTask task) = toHabiticaTask taskwarriorTask
     let req = habiticaCreateOrUpdateRequest headers htask
-    res <- liftIO $ runHabiticaReq req
-        >>= betterResponseHandle
-    (ResponseData
-        (HabiticaTask Task{taskHabiticaId})
-        maybeNewStats
-        maybeItemDrop) <- liftEither res
-    return
-        (TaskwarriorTask twTask {taskHabiticaId = taskHabiticaId}
-        , maybeNewStats
-        , maybeItemDrop
-        )
+    res <- liftIO $ runHabiticaReq req >>= betterResponseHandle
+    (ResponseData (HabiticaTask Task{taskHabiticaId}) _ _) <- liftEither res
+    return $ TaskwarriorTask twTask {taskHabiticaId = taskHabiticaId}
 
 -- TODO: rename this to something better
 modifyTaskwarriorTask ::
@@ -111,12 +100,7 @@ modifyTaskwarriorTask ::
     -> TaskwarriorTask
     -> ExceptT String IO (TaskwarriorTask, Maybe HabiticaUserStats, Maybe ItemDrop)
 modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask) =
-    -- Since the equality check only checks fields shared between Taskwarrior and Habitica,
-    -- changing Taskwarrior-only fields will simply return the modified task to Taskwarrior
-    -- without an unnecessary request to Habitica's API.
-    if oldTask == newTask then
-        return (twTask, Nothing, Nothing)
-    else case (taskStatus oldTask, taskStatus newTask) of
+    case (taskStatus oldTask, taskStatus newTask) of
         -- The task remains deleted and doesn't exist on Habitica,
         -- so return the task unchanged
         (Deleted, Deleted) -> return (twTask, Nothing, Nothing)
@@ -126,7 +110,7 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
         -- a deleted Habitica task
         (Deleted, newStatus) -> do
             -- Ignore the stats and drops as we are creating a new task so they are irrelevant
-            (newTwTask@(TaskwarriorTask Task{taskHabiticaId}), _, _) <- pushTaskwarriorTask headers twTask
+            newTwTask@(TaskwarriorTask Task{taskHabiticaId}) <- pushTaskwarriorTask headers twTask
             hId <- requireHabiticaId
                 "Attempt to push task to Habitica resulted in a local task with no UUID."
                 taskHabiticaId
@@ -170,7 +154,7 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
 
         -- The task status didn't change so just update the details.
         (_, _) -> do
-            (newTwTask, _, _) <- pushTaskwarriorTask headers twTask
+            newTwTask <- pushTaskwarriorTask headers twTask
             return (newTwTask, Nothing, Nothing)
   where
     requireHabiticaId :: Monad m => String -> Maybe UUID -> ExceptT String m UUID
@@ -271,7 +255,7 @@ addHook headers =
         taskJson <- liftIO getLine
         task <- liftEither $ eitherDecode (fromString taskJson)
         -- Stats shouldn't change on adding a task, so ignore them
-        (newTask, _, _) <- pushTaskwarriorTask headers task
+        newTask <- pushTaskwarriorTask headers task
         liftIO $ putStrLn $ B.toString $ encode newTask
 
 modifyHook :: HabiticaHeaders -> IO ()
@@ -280,18 +264,26 @@ modifyHook headers =
         (oldTaskJson, newTaskJson) <- liftIO $ (,) <$> getLine <*> getLine
         oldTask <- liftEither $ eitherDecode (fromString oldTaskJson)
         newTask <- liftEither $ eitherDecode (fromString newTaskJson)
-        oldUserStats <- fetchStats headers
-        (newerTask, maybeStats, maybeDrop) <- modifyTaskwarriorTask headers oldTask newTask
+        -- Since the equality check only checks fields shared between Taskwarrior and Habitica,
+        -- changing Taskwarrior-only fields will simply return the modified task to Taskwarrior
+        -- without an unnecessary request to Habitica's API.
+        if oldTask == newTask then
+            printTask newTask
+        else do
+            oldUserStats <- fetchStats headers
+            (newerTask, maybeStats, maybeDrop) <- modifyTaskwarriorTask headers oldTask newTask
 
-        case maybeStats of
-            Nothing -> return ()
-            Just newStats -> liftIO $ mapM_ putStrLn (getUserStatDiffs oldUserStats newStats)
+            case maybeStats of
+                Nothing -> return ()
+                Just newStats -> liftIO $ mapM_ putStrLn (getUserStatDiffs oldUserStats newStats)
 
-        case maybeDrop of
-            Nothing -> return ()
-            Just (ItemDrop itemDropMsg) -> liftIO $ putStrLn "" >> putStrLn (T.unpack itemDropMsg)
+            case maybeDrop of
+                Nothing -> return ()
+                Just (ItemDrop itemDropMsg) -> liftIO $ putStrLn "" >> putStrLn (T.unpack itemDropMsg)
 
-        liftIO $ putStrLn $ B.toString $ encode newerTask
+            printTask newerTask
+  where
+    printTask = liftIO . putStrLn . B.toString . encode
 
 sync :: HabiticaHeaders -> IO ()
 sync headers = do
