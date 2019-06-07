@@ -26,12 +26,17 @@ import qualified Data.UUID                 as UUID
 import qualified Network.HTTP.Req          as Req
 
 import           System.Environment        (getArgs)
-import           System.Exit               (exitFailure)
+import           System.Exit               (ExitCode (..), exitFailure)
 import qualified System.Process            as Process
 
 import           TaskUtils
 import           Types
 import           Web
+
+-- Minimum Taskwarrior version
+-- (for proper "import" functionality)
+minTaskwarriorVersion :: String
+minTaskwarriorVersion = "2.5.0"
 
 -- Taskwarrior command without STDIN
 twCmd :: [String] -> (String -> a) -> IO a
@@ -53,13 +58,20 @@ twExport filters =
 twImport :: TaskwarriorTask -> IO Text
 twImport task = twCmd' ["import", "-"] (B.toString $ encode task) (T.strip . T.pack)
 
-getHabiticaHeaders :: IO HabiticaHeaders
+twGetVersion :: IO (Maybe String)
+twGetVersion = do
+    (exitCode, _, _) <- Process.readProcessWithExitCode "which" ["task"] ""
+    case exitCode of
+        ExitFailure _ -> return Nothing
+        ExitSuccess   -> (\(_, result, _) -> Just $ T.unpack $ T.strip $ T.pack result) <$>
+            Process.readProcessWithExitCode "task" ["--version"] ""
+
+getHabiticaHeaders :: ExceptT String IO HabiticaHeaders
 getHabiticaHeaders = do
-    -- TODO: this assume (a) task is installed and (b) there will be no error
-    habiticaId <- twGet "rc.habitica.user_id"
-    habiticaApiKey <- twGet "rc.habitica.api_key"
+    habiticaId <- liftIO $ twGet "rc.habitica.user_id"
+    habiticaApiKey <- liftIO $ twGet "rc.habitica.api_key"
     case habiticaHeaders habiticaId habiticaApiKey of
-        Nothing      -> error "you goofed bruh"
+        Nothing -> throwError "Missing or malformed Habitica credentials in taskrc."
         Just headers -> return headers
 
 -- Return a list of taskwarrior tasks:
@@ -219,16 +231,20 @@ updateHabitica headers hTask@(HabiticaTask task) hasStatusChange = do
                     void $ runHabiticaReq (habiticaDeleteTask headers taskId)
 
 main :: IO ()
-main = do
+main = runAndFailOnError $ do
+    twVersion <- liftIO twGetVersion
+    version <- liftEither $
+        maybe (Left "Taskwarrior not installed or executable not in PATH.") Right twVersion
+    when (version < minTaskwarriorVersion) $
+        throwError $ "Found Taskwarrior " <> version <> " installed. Version " <> minTaskwarriorVersion <>
+                     " or higher required."
     headers <- getHabiticaHeaders
-    args <- getArgs
+    args <- liftIO getArgs
     case args of
-        ("sync":_) -> sync headers
+        ("sync":_) -> liftIO $ sync headers
         ("add":_) -> addHook headers
         ("modify":_) -> modifyHook headers
-        _ -> do
-            putStrLn "You must provide a valid action: sync, add, modify"
-            exitFailure
+        _ -> throwError "You must provide a valid action: sync, add, modify"
 
 runAndFailOnError :: ExceptT String IO a -> IO a
 runAndFailOnError m = do
@@ -249,39 +265,37 @@ fetchStats headers = do
         return
         maybeStats
 
-addHook :: HabiticaHeaders -> IO ()
-addHook headers =
-    runAndFailOnError $ do
-        taskJson <- liftIO getLine
-        task <- liftEither $ eitherDecode (fromString taskJson)
-        -- Stats shouldn't change on adding a task, so ignore them
-        newTask <- pushTaskwarriorTask headers task
-        liftIO $ putStrLn $ B.toString $ encode newTask
+addHook :: HabiticaHeaders -> ExceptT String IO ()
+addHook headers = do
+    taskJson <- liftIO getLine
+    task <- liftEither $ eitherDecode (fromString taskJson)
+    -- Stats shouldn't change on adding a task, so ignore them
+    newTask <- pushTaskwarriorTask headers task
+    liftIO $ putStrLn $ B.toString $ encode newTask
 
-modifyHook :: HabiticaHeaders -> IO ()
-modifyHook headers =
-    runAndFailOnError $ do
-        (oldTaskJson, newTaskJson) <- liftIO $ (,) <$> getLine <*> getLine
-        oldTask <- liftEither $ eitherDecode (fromString oldTaskJson)
-        newTask <- liftEither $ eitherDecode (fromString newTaskJson)
-        -- Since the equality check only checks fields shared between Taskwarrior and Habitica,
-        -- changing Taskwarrior-only fields will simply return the modified task to Taskwarrior
-        -- without an unnecessary request to Habitica's API.
-        if oldTask == newTask then
-            printTask newTask
-        else do
-            oldUserStats <- fetchStats headers
-            (newerTask, maybeStats, maybeDrop) <- modifyTaskwarriorTask headers oldTask newTask
+modifyHook :: HabiticaHeaders -> ExceptT String IO ()
+modifyHook headers = do
+    (oldTaskJson, newTaskJson) <- liftIO $ (,) <$> getLine <*> getLine
+    oldTask <- liftEither $ eitherDecode (fromString oldTaskJson)
+    newTask <- liftEither $ eitherDecode (fromString newTaskJson)
+    -- Since the equality check only checks fields shared between Taskwarrior and Habitica,
+    -- changing Taskwarrior-only fields will simply return the modified task to Taskwarrior
+    -- without an unnecessary request to Habitica's API.
+    if oldTask == newTask then
+        printTask newTask
+    else do
+        oldUserStats <- fetchStats headers
+        (newerTask, maybeStats, maybeDrop) <- modifyTaskwarriorTask headers oldTask newTask
 
-            case maybeStats of
-                Nothing -> return ()
-                Just newStats -> liftIO $ mapM_ putStrLn (getUserStatDiffs oldUserStats newStats)
+        case maybeStats of
+            Nothing -> return ()
+            Just newStats -> liftIO $ mapM_ putStrLn (getUserStatDiffs oldUserStats newStats)
 
-            case maybeDrop of
-                Nothing -> return ()
-                Just (ItemDrop itemDropMsg) -> liftIO $ putStrLn "" >> putStrLn (T.unpack itemDropMsg)
+        case maybeDrop of
+            Nothing -> return ()
+            Just (ItemDrop itemDropMsg) -> liftIO $ putStrLn "" >> putStrLn (T.unpack itemDropMsg)
 
-            printTask newerTask
+        printTask newerTask
   where
     printTask = liftIO . putStrLn . B.toString . encode
 
