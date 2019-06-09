@@ -1,23 +1,30 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DataKinds             #-}
-{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE TypeFamilies          #-}
 
 
 module Main where
 
-import           Control.Monad             (void, when)
+import           Control.Monad             (foldM_, forM_, void, when)
 import           Control.Monad.Except      (ExceptT, liftEither, runExceptT,
                                             throwError)
 import           Control.Monad.IO.Class    (liftIO)
+import           Control.Monad.Reader      (ReaderT, ask, runReaderT)
+import           Control.Monad.Trans.Class (lift)
+import           Control.Newtype.Generics  (Newtype, O)
 import qualified Control.Newtype.Generics  as NT
 
 import           Data.Aeson                (eitherDecode, encode)
 import           Data.Aeson.Types          (emptyObject)
 import qualified Data.ByteString.Lazy.UTF8 as B
+import           Data.HashMap.Strict       (HashMap)
 import qualified Data.HashMap.Strict       as HM
 import           Data.Maybe                (fromMaybe, isNothing)
+import           Data.Set                  (Set)
+import qualified Data.Set                  as Set
 import           Data.String               (fromString)
 import           Data.Text                 (Text)
 import qualified Data.Text                 as T
@@ -83,26 +90,26 @@ getTaskwarriorTasks = do
     habiticaUuid <- twExport ["habitica_uuid.any:"]
     return (pending, habiticaUuid)
 
-getHabiticaTasks :: HabiticaHeaders -> IO [HabiticaTask]
+getHabiticaTasks :: HabiticaHeaders -> ExceptT String IO [HabiticaTask]
 getHabiticaTasks headers = do
-    completed <- runHabiticaReq (habiticaGetTasks headers (Just "completedTodos"))
-        >>= habiticaResponseHandle
+    completed <- liftIO (runHabiticaReq (habiticaGetTasks headers (Just "completedTodos")))
+        >>= betterResponseHandle
     -- TODO: This could be made more efficient by just doing one request and filtering
     -- out the tasks we don't want, but the decoders would have to be updated to handle
     -- different shapes.
-    todos <- runHabiticaReq (habiticaGetTasks headers (Just "todos"))
-        >>= habiticaResponseHandle
-    dailies <- runHabiticaReq (habiticaGetTasks headers (Just "dailys"))
-        >>= habiticaResponseHandle
+    todos <- liftIO (runHabiticaReq (habiticaGetTasks headers (Just "todos")))
+        >>= betterResponseHandle
+    dailies <- liftIO (runHabiticaReq (habiticaGetTasks headers (Just "dailys")))
+        >>= betterResponseHandle
     -- We don't care about rewards or habits
-    return $ todos <> dailies <> completed
+    return $ mconcat $ fmap resBody [todos, dailies, completed]
 
 pushTaskwarriorTask :: HabiticaHeaders -> TaskwarriorTask -> ExceptT String IO TaskwarriorTask
 pushTaskwarriorTask headers taskwarriorTask@(TaskwarriorTask twTask) = do
     let htask@(HabiticaTask task) = toHabiticaTask taskwarriorTask
     let req = habiticaCreateOrUpdateRequest headers htask
-    res <- liftIO $ runHabiticaReq req >>= betterResponseHandle
-    (ResponseData (HabiticaTask Task{taskHabiticaId}) _ _) <- liftEither res
+    (ResponseData (HabiticaTask Task{taskHabiticaId}) _ _) <-
+        liftIO (runHabiticaReq req) >>= betterResponseHandle
     return $ TaskwarriorTask twTask {taskHabiticaId = taskHabiticaId}
 
 -- TODO: rename this to something better
@@ -127,9 +134,9 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
                 "Attempt to push task to Habitica resulted in a local task with no UUID."
                 taskHabiticaId
             if newStatus == Completed then do
-                res <- liftIO $ runHabiticaReq (habiticaScoreTask headers hId Up)
-                    >>= betterResponseHandle
-                (ResponseData _ maybeNewStats maybeItemDrop) <- liftEither res
+                (ResponseData _ maybeNewStats maybeItemDrop) <-
+                    liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
+                        >>= betterResponseHandle
                 return (newTwTask, maybeNewStats, maybeItemDrop)
             else
                 return (newTwTask, Nothing, Nothing)
@@ -138,25 +145,28 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
         -- on Habitica.
         (Completed, Pending) -> do
             hId <- getId
-            res <- liftIO $ runHabiticaReq (habiticaScoreTask headers hId Down)
-                >>= betterResponseHandle
-            (ResponseData _ maybeNewStats maybeItemDrop) <- liftEither res
+            (ResponseData _ maybeNewStats maybeItemDrop) <-
+                liftIO (runHabiticaReq (habiticaScoreTask headers hId Down))
+                    >>= betterResponseHandle
             return (twTask, maybeNewStats, maybeItemDrop)
 
         -- When going from Pending to Completed, "check" the task
         -- on Habitica.
         (Pending, Completed) -> do
             hId <- getId
-            res <- liftIO $ runHabiticaReq (habiticaScoreTask headers hId Up)
-                >>= betterResponseHandle
-            (ResponseData _ maybeNewStats maybeItemDrop) <- liftEither res
+            (ResponseData _ maybeNewStats maybeItemDrop) <-
+                liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
+                    >>= betterResponseHandle
             return (twTask, maybeNewStats, maybeItemDrop)
 
         -- If the task was deleted (and wasn't already deleted, checked for above)
         -- delete the task on Habitica.
         (_, Deleted) -> do
             hId <- getId
-            liftIO $ runHabiticaReq (habiticaDeleteTask headers hId)
+            -- We don't need the response, but we want to validate that the
+            -- request went through okay.
+            _ <- liftIO (runHabiticaReq (habiticaDeleteTask headers hId))
+                >>= betterResponseHandle
             -- Unset the Habitica ID since the task no longer exists
             return
                 (TaskwarriorTask newTask{taskHabiticaId = Nothing}
@@ -177,71 +187,40 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
         "Task has no Habitica ID and cannot be updated."
         (taskHabiticaId newTask)
 
-betterResponseHandle :: HabiticaResponse a -> IO (Either String (ResponseData a))
+betterResponseHandle :: HabiticaResponse a -> ExceptT String IO (ResponseData a)
 betterResponseHandle res =
     case res of
         HttpException e ->
-            return $ Left ("Something went wrong with the network request: " <> show e)
+            throwError ("Something went wrong with the network request: " <> show e)
         ErrorResponse errText errMessage ->
-            return $ Left (T.unpack $ errText <> ": " <> errMessage)
+            throwError (T.unpack $ errText <> ": " <> errMessage)
         ParseError errText ->
-            return $
-            Left
-                ("Something went wrong while parsing the response from Habitica: " <>
-                 errText)
-        DataResponse dataRes -> return $ Right dataRes
-
-habiticaResponseHandle :: HabiticaResponse a -> IO a
-habiticaResponseHandle (HttpException e) =
-    error $ "Something went wrong with the network request: " <> show e
-habiticaResponseHandle (ErrorResponse errText errMessage) =
-    error $ T.unpack $ errText <> ": " <> errMessage
-habiticaResponseHandle (ParseError errText) =
-    error $ "Something went wrong while parsing the response from Habitica: " <> errText
-habiticaResponseHandle (DataResponse response) = return (resBody response)
-
-addToHabitica :: HabiticaHeaders -> TaskwarriorTask -> IO ()
-addToHabitica headers twTask@(TaskwarriorTask task) = do
-    let habiticaTask = toHabiticaTask twTask
-    -- Create the taskwarrior task on Habitica and retrieve the id of the returned task
-    (HabiticaTask Task{taskHabiticaId}) <-
-        runHabiticaReq (habiticaCreateOrUpdateRequest headers habiticaTask) >>=
-        habiticaResponseHandle
-    -- Update the task in taskwarrior with the new id
-    twImport (TaskwarriorTask $ task {taskHabiticaId = taskHabiticaId})
-    return ()
-
-updateHabitica :: HabiticaHeaders -> HabiticaTask -> HasStatusChange -> IO ()
-updateHabitica headers hTask@(HabiticaTask task) hasStatusChange = do
-    -- Update the task on Habitica
-    runHabiticaReq (habiticaCreateOrUpdateRequest headers hTask) >>=
-        habiticaResponseHandle
-    -- If the status changed, we need to "score" the task to change it on Habitica
-    when hasStatusChange $ do
-            let taskId =
-                    fromMaybe
-                        (error "Trying to update a Habitica task with no ID.")
-                        (taskHabiticaId task)
-            case taskStatus task of
-                Pending ->
-                    void $ runHabiticaReq (habiticaScoreTask headers taskId Down)
-                Completed ->
-                    void $ runHabiticaReq (habiticaScoreTask headers taskId Up)
-                Deleted ->
-                    void $ runHabiticaReq (habiticaDeleteTask headers taskId)
+            throwError
+                ("Something went wrong while parsing the response from Habitica: " <> errText)
+        DataResponse dataRes -> return dataRes
 
 main :: IO ()
 main = runAndFailOnError $ do
     twVersion <- liftIO twGetVersion
-    version <- liftEither $
-        maybe (Left "Taskwarrior not installed or executable not in PATH.") Right twVersion
+    version <- maybe
+        (throwError "Taskwarrior not installed or executable not in PATH.")
+        return
+        twVersion
     when (version < minTaskwarriorVersion) $
         throwError $ "Found Taskwarrior " <> version <> " installed. Version " <> minTaskwarriorVersion <>
                      " or higher required."
     headers <- getHabiticaHeaders
     args <- liftIO getArgs
     case args of
-        ("sync":_) -> liftIO $ sync headers
+        ("sync":rest) ->
+            let
+                args = foldl (\acc arg ->
+                    case arg of
+                        "--verbose" -> acc{syncVerbose = True}
+                        _           -> acc
+                    ) (SyncArgs False) rest
+            in
+            runReaderT (sync headers) args
         ("add":_) -> addHook headers
         ("modify":_) -> modifyHook headers
         _ -> throwError "You must provide a valid action: sync, add, modify"
@@ -257,13 +236,10 @@ runAndFailOnError m = do
 
 fetchStats :: HabiticaHeaders -> ExceptT String IO HabiticaUserStats
 fetchStats headers = do
-    userStatsEither <- liftIO $ runHabiticaReq (habiticaGetUserStats headers)
-        >>= betterResponseHandle
-    (ResponseData _ maybeStats _) <- liftEither userStatsEither
-    maybe
-        (throwError "Unable to fetch stats for the user.")
-        return
-        maybeStats
+    (ResponseData _ maybeStats _) <-
+        liftIO (runHabiticaReq (habiticaGetUserStats headers))
+            >>= betterResponseHandle
+    maybe (throwError "Unable to fetch stats for the user.") return maybeStats
 
 addHook :: HabiticaHeaders -> ExceptT String IO ()
 addHook headers = do
@@ -299,62 +275,124 @@ modifyHook headers = do
   where
     printTask = liftIO . putStrLn . B.toString . encode
 
-sync :: HabiticaHeaders -> IO ()
+sync :: HabiticaHeaders -> ReaderT SyncArgs (ExceptT String IO) ()
 sync headers = do
-    habiticaTasks <- getHabiticaTasks headers
-    (twOnlyTasks, twHabiticaSyncedTasks) <- getTaskwarriorTasks
-    let hTasks =
-            foldr
-                (\hTask@(HabiticaTask task) taskMap ->
-                     HM.insert (NT.unpack <$> taskHabiticaId task) hTask taskMap)
-                HM.empty
-                habiticaTasks
-    let twTasks =
-            foldr
-                (\twTask@(TaskwarriorTask task) taskMap ->
-                     HM.insert (NT.unpack <$> taskHabiticaId task) twTask taskMap)
-                HM.empty
-                twHabiticaSyncedTasks
-    -- Tasks that exist in Habitica that Taskwarrior doesn't know about yet
-    let habiticaOnlyTasks = HM.difference hTasks twTasks
-    -- Tasks that have previously synced between Taskwarrior and Habitica
-    -- but have since been deleted from Habitica
-    let deletedFromHabitica = HM.difference twTasks hTasks
-    let taskUpdates =
-            HM.mapMaybe id $
-            HM.intersectionWith
-                (\h@(HabiticaTask hTask) t@(TaskwarriorTask twTask) ->
-                     if hTask == twTask
-                         then Nothing
-                         else if taskModified hTask > taskModified twTask
-                    -- Habitica was updated more recently, so update Taskwarrior
-                                  then Just $
-                                       UpdateTaskwarrior $ updateTaskwarriorTask h t
-                    -- Taskwarrior was updated more recently, so update Habitica
-                                  else Just $
-                                       UpdateHabitica
-                                           (updateHabiticaTask t h)
-                                           (taskStatus hTask /= taskStatus twTask))
-                hTasks
-                twTasks
-    let changes =
-            map Update (HM.elems taskUpdates) <>
-            map AddToHabitica twOnlyTasks <>
-            map AddToTaskwarrior (HM.elems habiticaOnlyTasks) <>
-            map DeleteFromTaskwarrior (HM.elems deletedFromHabitica)
-    mapM_
-        (\case
-            AddToTaskwarrior habiticaTask ->
-                void $ twImport (toTaskwarriorTask habiticaTask)
-            DeleteFromTaskwarrior taskwarriorTask@(TaskwarriorTask task) ->
-                void $ twImport (TaskwarriorTask task{taskStatus = Deleted})
-            AddToHabitica taskwarriorTask -> addToHabitica headers taskwarriorTask
-            Update (UpdateTaskwarrior taskwarriorTask) ->
-                void $ twImport taskwarriorTask
-            Update (UpdateHabitica habiticaTask hasStatusChange) ->
-                updateHabitica headers habiticaTask hasStatusChange)
-        changes
+    args <- ask
+    let verbose = syncVerbose args
+    habiticaTasks <- lift $ getHabiticaTasks headers
+    (twOnlyTasks, twHabiticaSyncedTasks) <- liftIO getTaskwarriorTasks
 
+    -- The task exists in Taskwarrior but not on Habitica, so we have to push it to Habitica
+    -- and set the new Habitica ID in Taskwarrior
+    lift $ forM_ twOnlyTasks $ \twTask -> do
+        liftIO $ do
+            putStrLn $ "Task: " <> T.unpack (taskText (NT.unpack twTask))
+            putStrLn "    Status: Created in Taskwarrior."
+            putStrLn "    Action: Pushing to Habitica and updating Habitica ID in Taskwarrior."
+            putStrLn ""
+        newTwTask <- pushTaskwarriorTask headers twTask
+        void $ liftIO $ twImport newTwTask
+
+    -- Handle tasks that exist in Habitica
+    let hTasks = tasksToHM habiticaTasks
+    let twSyncedTasks = tasksToHM twHabiticaSyncedTasks
+    let keys = Set.fromList $ HM.keys hTasks <> HM.keys twSyncedTasks
+    userStats <- lift (fetchStats headers)
+    lift $ foldM_ (\stats key ->
+        case (HM.lookup key hTasks, HM.lookup key twSyncedTasks) of
+            -- This should never occur, but if it somehow ever does, at least it has a descriptive error
+            (Nothing, Nothing) ->
+                throwError $ "Impossible state. A key was found with no corresponding value, " <>
+                             "despite existing in one of the hashmaps. Key was: " <> show key
+
+            -- The task exists on Habitica but not in Taskwarrior, so we have to import it to Taskwarrior
+            (Just habiticaTask, Nothing) -> liftIO $ do
+                putStrLn $ "Task: " <> T.unpack (taskText (NT.unpack habiticaTask))
+                putStrLn "    Status: Created on Habitica."
+                putStrLn "    Action: Importing into Taskwarrior."
+                putStrLn ""
+                twImport (toTaskwarriorTask habiticaTask)
+                return stats
+
+            -- The task does not exist on Habitica, but it was previously synced with Taskwarrior.
+            -- This means it used to exist on Habitica and was deleted, so set it to Deleted in Taskwarrior.
+            (Nothing, Just (TaskwarriorTask task)) -> liftIO $ do
+                putStrLn $ "Task: " <> T.unpack (taskText task)
+                putStrLn "    Status: Deleted on Habitica."
+                case taskStatus task of
+                    Completed -> do
+                        putStrLn "    Action: Already completed in Taskwarrior. Leaving status as Completed. Unsetting Habitica ID."
+                        void $ liftIO $ twImport (TaskwarriorTask task{taskHabiticaId = Nothing})
+                    _ -> do
+                        putStrLn "    Action: Setting status to Deleted in Taskwarrior. Unsetting Habitica ID."
+                        void $ liftIO $ twImport (TaskwarriorTask
+                            task{ taskStatus = Deleted
+                                , taskHabiticaId = Nothing
+                                })
+                putStrLn ""
+                return stats
+
+            -- The task exists on both sides, so we'll take the most recently modified of the two
+            -- and update the other to match
+            (Just habiticaTask, Just taskwarriorTask) ->
+                if NT.unpack habiticaTask == NT.unpack taskwarriorTask then do
+                    when verbose $
+                        liftIO $ do
+                            bothSidesLog habiticaTask taskwarriorTask
+                            putStrLn "    Action: Tasks are equal. Doing nothing."
+                            putStrLn ""
+                    return stats
+                else do
+                    liftIO $ bothSidesLog habiticaTask taskwarriorTask
+                    newStats <- updateFromNewest habiticaTask taskwarriorTask stats
+                    liftIO $ putStrLn ""
+                    return $ fromMaybe stats newStats
+        ) userStats keys
+  where
+    tasksToHM :: (Newtype n, O n ~ Task) => [n] -> HashMap (Maybe UUID.UUID) n
+    tasksToHM =
+        foldr (\wrappedTask -> HM.insert
+            (NT.unpack <$> taskHabiticaId (NT.unpack wrappedTask)) wrappedTask
+        ) HM.empty
+
+    updateFromNewest
+        :: HabiticaTask
+        -> TaskwarriorTask
+        -> HabiticaUserStats
+        -> ExceptT String IO (Maybe HabiticaUserStats)
+    updateFromNewest habiticaTask@(HabiticaTask hTask) taskwarriorTask@(TaskwarriorTask twTask) currentStats =
+        if taskModified hTask > taskModified twTask then do
+            -- If the task was modified most recently on Habitica, we want to update
+            -- the Taskwarrior task with the Habitica details and import it back
+            -- into Taskwarrior
+            liftIO $ putStrLn "    Action: Habitica task is most recently modified. Updating in Taskwarrior"
+            liftIO $ twImport (updateTaskwarriorTask habiticaTask taskwarriorTask)
+            return Nothing
+        else do
+            -- If the task was modified most recently on Taskwarrior, we can use the
+            -- modifyTaskwarriorTask function to update Habitica by converting our Habitica
+            -- task into a Taskwarrior task to fit the type signature
+            liftIO $ putStrLn "    Action: Taskwarrior task is most recently modified. Updating on Habitica."
+            (newTwTask, maybeStats, maybeDrop) <-
+                modifyTaskwarriorTask headers (toTaskwarriorTask habiticaTask) taskwarriorTask
+
+            liftIO $ twImport newTwTask
+
+            case maybeStats of
+                Nothing -> return ()
+                Just newStats -> liftIO $ mapM_ (putStrLn . ("    " <>)) (getUserStatDiffs currentStats newStats)
+
+            case maybeDrop of
+                Nothing -> return ()
+                Just (ItemDrop itemDropMsg) -> liftIO $ putStrLn ("    " <> T.unpack itemDropMsg)
+
+            return maybeStats
+
+    bothSidesLog :: HabiticaTask -> TaskwarriorTask -> IO ()
+    bothSidesLog habiticaTask taskwarriorTask = do
+        putStrLn $ "Habitica Task:    " <> T.unpack (taskText (NT.unpack habiticaTask))
+        putStrLn $ "Taskwarrior Task: " <> T.unpack (taskText (NT.unpack taskwarriorTask))
+        putStrLn "    Status: Exists on both Habitica and Taskwarrior."
 
 getUserStatDiffs :: HabiticaUserStats -> HabiticaUserStats -> [String]
 getUserStatDiffs old new

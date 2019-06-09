@@ -329,3 +329,8 @@ data UpdateChange
                      HasStatusChange
     | UpdateTaskwarrior TaskwarriorTask
     deriving (Show)
+
+{- ARG TYPES -}
+
+data SyncArgs = SyncArgs
+    { syncVerbose :: Bool }
