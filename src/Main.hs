@@ -141,23 +141,15 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
             else
                 return (newTwTask, Nothing, Nothing)
 
-        -- When going from Completed to Pending, "uncheck" the task
+        -- When going from Completed to Pending or Waiting, "uncheck" the task
         -- on Habitica.
-        (Completed, Pending) -> do
-            hId <- getId
-            (ResponseData _ maybeNewStats maybeItemDrop) <-
-                liftIO (runHabiticaReq (habiticaScoreTask headers hId Down))
-                    >>= betterResponseHandle
-            return (twTask, maybeNewStats, maybeItemDrop)
+        (Completed, Pending) -> scoreOnHabitica Down
+        (Completed, Waiting) -> scoreOnHabitica Down
 
-        -- When going from Pending to Completed, "check" the task
+        -- When going from Pending or Waiting to Completed, "check" the task
         -- on Habitica.
-        (Pending, Completed) -> do
-            hId <- getId
-            (ResponseData _ maybeNewStats maybeItemDrop) <-
-                liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
-                    >>= betterResponseHandle
-            return (twTask, maybeNewStats, maybeItemDrop)
+        (Pending, Completed) -> scoreOnHabitica Up
+        (Waiting, Completed) -> scoreOnHabitica Up
 
         -- If the task was deleted (and wasn't already deleted, checked for above)
         -- delete the task on Habitica.
@@ -186,6 +178,13 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
     getId = requireHabiticaId
         "Task has no Habitica ID and cannot be updated."
         (taskHabiticaId newTask)
+
+    scoreOnHabitica dir = do
+        hId <- getId
+        (ResponseData _ maybeNewStats maybeItemDrop) <-
+            liftIO (runHabiticaReq (habiticaScoreTask headers hId dir))
+                >>= betterResponseHandle
+        return (twTask, maybeNewStats, maybeItemDrop)
 
 betterResponseHandle :: HabiticaResponse a -> ExceptT String IO (ResponseData a)
 betterResponseHandle res =
@@ -254,10 +253,9 @@ modifyHook headers = do
     (oldTaskJson, newTaskJson) <- liftIO $ (,) <$> getLine <*> getLine
     oldTask <- liftEither $ eitherDecode (fromString oldTaskJson)
     newTask <- liftEither $ eitherDecode (fromString newTaskJson)
-    -- Since the equality check only checks fields shared between Taskwarrior and Habitica,
-    -- changing Taskwarrior-only fields will simply return the modified task to Taskwarrior
-    -- without an unnecessary request to Habitica's API.
-    if oldTask == newTask then
+    -- Turn the old and new Taskwarrior tasks into Habitica tasks; if
+    -- they are equal, then we don't need to push anything to Habitica.
+    if toHabiticaTask oldTask == toHabiticaTask newTask then
         printTask newTask
     else do
         oldUserStats <- fetchStats headers
@@ -335,7 +333,7 @@ sync headers = do
             -- The task exists on both sides, so we'll take the most recently modified of the two
             -- and update the other to match
             (Just habiticaTask, Just taskwarriorTask) ->
-                if NT.unpack habiticaTask == NT.unpack taskwarriorTask then do
+                if habiticaTask == toHabiticaTask taskwarriorTask then do
                     when verbose $
                         liftIO $ do
                             bothSidesLog habiticaTask taskwarriorTask

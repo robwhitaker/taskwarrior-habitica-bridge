@@ -58,6 +58,7 @@ data TaskDifficulty
 
 data TaskStatus
     = Pending
+    | Waiting
     | Completed
     | Deleted
     deriving (Show, Eq)
@@ -185,6 +186,7 @@ instance FromJSON TaskwarriorTask where
             (o .: "status" >>= \status ->
                  case status :: Text of
                      "pending"   -> return Pending :: Parser TaskStatus
+                     "waiting"   -> return Waiting
                      "completed" -> return Completed
                      "deleted"   -> return Deleted
                      _           -> fail "Invalid status.") <*>

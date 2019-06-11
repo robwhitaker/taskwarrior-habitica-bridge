@@ -1,5 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies      #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module TaskUtils where
 
@@ -10,17 +9,35 @@ import           Data.Aeson.Types         (Value, emptyObject)
 
 import           Types
 
-convertTask :: (Newtype n1, Newtype n2, O n1 ~ Task, O n2 ~ Task) => n1 -> Value -> n2
-convertTask task json = NT.pack $ (NT.unpack task) {rawJson = json}
+convertTask :: (Newtype n1, Newtype n2, O n1 ~ Task, O n2 ~ Task) => (Task -> Task) -> n1 -> Value -> n2
+convertTask f task json = NT.pack $ f (NT.unpack task) {rawJson = json}
 
 toHabiticaTask :: TaskwarriorTask -> HabiticaTask
-toHabiticaTask task = convertTask task emptyObject
+toHabiticaTask task = convertTask statusFixer task emptyObject
+  where
+    statusFixer :: Task -> Task
+    statusFixer inTask =
+        inTask {
+            taskStatus =
+                case taskStatus inTask of
+                    Waiting -> Pending
+                    other   -> other
+        }
 
 toTaskwarriorTask :: HabiticaTask -> TaskwarriorTask
-toTaskwarriorTask task = convertTask task emptyObject
+toTaskwarriorTask task = convertTask id task emptyObject
 
 updateTaskwarriorTask :: HabiticaTask -> TaskwarriorTask -> TaskwarriorTask
-updateTaskwarriorTask hTask twTask = convertTask hTask (rawJson $ NT.unpack twTask)
+updateTaskwarriorTask hTask twTask = convertTask id hTask (rawJson $ NT.unpack twTask)
+  where
+    statusFixer :: Task -> Task
+    statusFixer inTask =
+        inTask {
+            taskStatus =
+                case (taskStatus inTask, taskStatus (NT.unpack twTask)) of
+                    (Pending, Waiting) -> Waiting
+                    (other, _)         -> other
+        }
 
 -- This technically ignores the Habitica task
 -- as leaving out the origin JSON fields is okay
