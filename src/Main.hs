@@ -92,7 +92,7 @@ getTaskwarriorTasks = do
 
 getHabiticaTasks :: HabiticaHeaders -> ExceptT String IO [HabiticaTask]
 getHabiticaTasks headers = do
-    completed <- liftIO (runHabiticaReq (habiticaGetTasks headers (Just "completedTodos")))
+    completed <- liftIO (runHabiticaReq (habiticaGetTasks headers (Just "_allCompletedTodos")))
         >>= betterResponseHandle
     -- TODO: This could be made more efficient by just doing one request and filtering
     -- out the tasks we don't want, but the decoders would have to be updated to handle
