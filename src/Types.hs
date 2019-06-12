@@ -26,21 +26,21 @@ import qualified Data.UUID                 as UUID
 import           Network.HTTP.Req          (HttpException)
 
 {- TASK TYPE -}
-data Task = Task
+data Task status = Task
     { taskHabiticaId :: Maybe UUID
     , taskType       :: TaskType
     , taskText       :: Text
     , taskDifficulty :: TaskDifficulty
-    , taskStatus     :: TaskStatus
+    , taskStatus     :: status
     , taskDue        :: Maybe UTCTime
     , taskModified   :: UTCTime
     , rawJson        :: Value
     } deriving (Show)
 
-instance Eq Task where
-    -- The Eq instance ignores the modified field as *when* the tasks changed
-    -- is inconsequential to comparing the *content* of the task. It also ignores
-    -- the rawJson as that's only stored for the sake of not losing unparsed fields.
+-- The Eq instance ignores the modified field as *when* the tasks changed
+-- is inconsequential to comparing the *content* of the task. It also ignores
+-- the rawJson as that's only stored for the sake of not losing unparsed fields.
+instance Eq status => Eq (Task status) where
     (==) t1 t2 =
         (taskHabiticaId t1 == taskHabiticaId t2) &&
         (taskType t1 == taskType t2) &&
@@ -56,11 +56,17 @@ data TaskDifficulty
     | Hard
     deriving (Show, Eq)
 
-data TaskStatus
-    = Pending
-    | Waiting
-    | Completed
-    | Deleted
+data TWTaskStatus
+    = TWPending
+    | TWWaiting
+    | TWCompleted
+    | TWDeleted
+    deriving (Show, Eq)
+
+data HTaskStatus
+    = HPending
+    | HCompleted
+    | HDeleted
     deriving (Show, Eq)
 
 data TaskType
@@ -105,8 +111,8 @@ unsafeUUID uuidStr = UUID $ fromJust $ UUID.fromText uuidStr
 -- For encoding and decoding between Taskwarrior and Habitica
 -}
 newtype HabiticaTask =
-    HabiticaTask Task
-    deriving (Show, Eq, Generic)
+    HabiticaTask (Task HTaskStatus)
+  deriving (Show, Eq, Generic)
 
 instance Newtype HabiticaTask
 
@@ -133,11 +139,11 @@ instance FromJSON HabiticaTask where
                         then do
                             isDue <- o .: "isDue"
                             if not isCompleted && isDue
-                                then return Pending
-                                else return Completed
+                                then return HPending
+                                else return HCompleted
                         else if isCompleted
-                                 then return Completed
-                                 else return Pending
+                                 then return HCompleted
+                                 else return HPending
                 due <- o .:? "date" >>= text2Time
                 modified <- o .: "updatedAt" >>= textToTime habiticaTimeFormat
                 let rawJson = Object o
@@ -164,8 +170,8 @@ instance ToJSON HabiticaTask where
             ]
 
 newtype TaskwarriorTask =
-    TaskwarriorTask Task
-    deriving (Show, Eq, Generic)
+    TaskwarriorTask (Task TWTaskStatus)
+  deriving (Show, Eq, Generic)
 
 instance Newtype TaskwarriorTask
 
@@ -185,10 +191,10 @@ instance FromJSON TaskwarriorTask where
                      _ -> fail "Invalid string provided as task difficulty (priority).") <*>
             (o .: "status" >>= \status ->
                  case status :: Text of
-                     "pending"   -> return Pending :: Parser TaskStatus
-                     "waiting"   -> return Waiting
-                     "completed" -> return Completed
-                     "deleted"   -> return Deleted
+                     "pending"   -> return TWPending :: Parser TWTaskStatus
+                     "waiting"   -> return TWWaiting
+                     "completed" -> return TWCompleted
+                     "deleted"   -> return TWDeleted
                      _           -> fail "Invalid status.") <*>
             (o .:? "due" >>=
              maybe (return Nothing) (fmap Just . textToTime taskwarriorTimeFormat)) <*>
@@ -196,20 +202,18 @@ instance FromJSON TaskwarriorTask where
             return (Object o)
 
 instance ToJSON TaskwarriorTask where
-    toJSON (TaskwarriorTask task)
-        -- Taskwarrior's "import" functionality removes all fields that
-        -- are not included in the JSON, so by filtering out Null, we
-        -- effectively remove the field
-     = Object $ HM.filter (/= Null) (HM.union newObj oldObj)
+    -- Taskwarrior's "import" functionality removes all fields that
+    -- are not included in the JSON, so by filtering out Null, we
+    -- effectively remove the field
+    toJSON (TaskwarriorTask task) = Object $ HM.filter (/= Null) (HM.union newObj oldObj)
       where
         (Object newObj) =
             object
                 [ "description" .= taskText task
                 , "habitica_task_type" .= taskType task
                 , "habitica_uuid" .= taskHabiticaId task
-                , "habitica_difficulty" .=
-                  (String . T.toLower . T.pack . show . taskDifficulty) task
-                , "status" .= (String . T.toLower . T.pack . show . taskStatus) task
+                , "habitica_difficulty" .= (String . T.toLower . T.pack . show . taskDifficulty) task
+                , "status" .= (String . T.drop 2 . T.toLower . T.pack . show . taskStatus) task
                 , "due" .= (timeToText taskwarriorTimeFormat <$> taskDue task)
                 ]
         -- TODO: Is there a safer way to do this? This will fail

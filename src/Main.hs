@@ -14,6 +14,8 @@ import           Control.Monad.Except      (ExceptT, liftEither, runExceptT,
 import           Control.Monad.IO.Class    (liftIO)
 import           Control.Monad.Reader      (ReaderT, ask, runReaderT)
 import           Control.Monad.Trans.Class (lift)
+import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
+
 import           Control.Newtype.Generics  (Newtype, O)
 import qualified Control.Newtype.Generics  as NT
 
@@ -106,11 +108,15 @@ getHabiticaTasks headers = do
 
 pushTaskwarriorTask :: HabiticaHeaders -> TaskwarriorTask -> ExceptT String IO TaskwarriorTask
 pushTaskwarriorTask headers taskwarriorTask@(TaskwarriorTask twTask) = do
-    let htask@(HabiticaTask task) = toHabiticaTask taskwarriorTask
-    let req = habiticaCreateOrUpdateRequest headers htask
-    (ResponseData (HabiticaTask Task{taskHabiticaId}) _ _) <-
-        liftIO (runHabiticaReq req) >>= betterResponseHandle
-    return $ TaskwarriorTask twTask {taskHabiticaId = taskHabiticaId}
+    newHabiticaId <-
+        case toHabiticaTask taskwarriorTask of
+            Nothing -> return Nothing
+            Just htask@(HabiticaTask task) -> do
+                let req = habiticaCreateOrUpdateRequest headers htask
+                (ResponseData (HabiticaTask Task{taskHabiticaId}) _ _) <-
+                    liftIO (runHabiticaReq req) >>= betterResponseHandle
+                return taskHabiticaId
+    return $ TaskwarriorTask twTask {taskHabiticaId = newHabiticaId}
 
 -- TODO: rename this to something better
 modifyTaskwarriorTask ::
@@ -122,18 +128,18 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
     case (taskStatus oldTask, taskStatus newTask) of
         -- The task remains deleted and doesn't exist on Habitica,
         -- so return the task unchanged
-        (Deleted, Deleted) -> return (twTask, Nothing, Nothing)
+        (TWDeleted, TWDeleted) -> return (twTask, Nothing, Nothing)
 
         -- A previously deleted task is being brought back on the Taskwarrior
         -- side, so a new Habitica task must be created since we can't recover
         -- a deleted Habitica task
-        (Deleted, newStatus) -> do
+        (TWDeleted, newStatus) -> do
             -- Ignore the stats and drops as we are creating a new task so they are irrelevant
             newTwTask@(TaskwarriorTask Task{taskHabiticaId}) <- pushTaskwarriorTask headers twTask
             hId <- requireHabiticaId
                 "Attempt to push task to Habitica resulted in a local task with no UUID."
                 taskHabiticaId
-            if newStatus == Completed then do
+            if newStatus == TWCompleted then do
                 (ResponseData _ maybeNewStats maybeItemDrop) <-
                     liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
                         >>= betterResponseHandle
@@ -143,17 +149,17 @@ modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask 
 
         -- When going from Completed to Pending or Waiting, "uncheck" the task
         -- on Habitica.
-        (Completed, Pending) -> scoreOnHabitica Down
-        (Completed, Waiting) -> scoreOnHabitica Down
+        (TWCompleted, TWPending) -> scoreOnHabitica Down
+        (TWCompleted, TWWaiting) -> scoreOnHabitica Down
 
         -- When going from Pending or Waiting to Completed, "check" the task
         -- on Habitica.
-        (Pending, Completed) -> scoreOnHabitica Up
-        (Waiting, Completed) -> scoreOnHabitica Up
+        (TWPending, TWCompleted) -> scoreOnHabitica Up
+        (TWWaiting, TWCompleted) -> scoreOnHabitica Up
 
         -- If the task was deleted (and wasn't already deleted, checked for above)
         -- delete the task on Habitica.
-        (_, Deleted) -> do
+        (_, TWDeleted) -> do
             hId <- getId
             -- We don't need the response, but we want to validate that the
             -- request went through okay.
@@ -318,13 +324,13 @@ sync headers = do
                 putStrLn $ "Task: " <> T.unpack (taskText task)
                 putStrLn "    Status: Deleted on Habitica."
                 case taskStatus task of
-                    Completed -> do
+                    TWCompleted -> do
                         putStrLn "    Action: Already completed in Taskwarrior. Leaving status as Completed. Unsetting Habitica ID."
                         void $ liftIO $ twImport (TaskwarriorTask task{taskHabiticaId = Nothing})
                     _ -> do
                         putStrLn "    Action: Setting status to Deleted in Taskwarrior. Unsetting Habitica ID."
                         void $ liftIO $ twImport (TaskwarriorTask
-                            task{ taskStatus = Deleted
+                            task{ taskStatus = TWDeleted
                                 , taskHabiticaId = Nothing
                                 })
                 putStrLn ""
@@ -333,7 +339,7 @@ sync headers = do
             -- The task exists on both sides, so we'll take the most recently modified of the two
             -- and update the other to match
             (Just habiticaTask, Just taskwarriorTask) ->
-                if habiticaTask == toHabiticaTask taskwarriorTask then do
+                if Just habiticaTask == toHabiticaTask taskwarriorTask then do
                     when verbose $
                         liftIO $ do
                             bothSidesLog habiticaTask taskwarriorTask
@@ -347,7 +353,7 @@ sync headers = do
                     return $ fromMaybe stats newStats
         ) userStats keys
   where
-    tasksToHM :: (Newtype n, O n ~ Task) => [n] -> HashMap (Maybe UUID.UUID) n
+    tasksToHM :: (Newtype n, O n ~ Task status) => [n] -> HashMap (Maybe UUID.UUID) n
     tasksToHM =
         foldr (\wrappedTask -> HM.insert
             (NT.unpack <$> taskHabiticaId (NT.unpack wrappedTask)) wrappedTask
