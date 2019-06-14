@@ -26,6 +26,7 @@ toHabiticaTask task = convertTask statusFixer task emptyObject
             TWPending   -> Just inTask { taskStatus = HPending }
             TWCompleted -> Just inTask { taskStatus = HCompleted }
             TWDeleted   -> Just inTask { taskStatus = HDeleted }
+            TWRecurring -> Nothing
 
 toTaskwarriorTask :: HabiticaTask -> TaskwarriorTask
 toTaskwarriorTask task = fromJust $ convertTask statusFixer task emptyObject
@@ -43,6 +44,17 @@ updateTaskwarriorTask hTask twTask = fromJust $ convertTask statusFixer hTask (r
     statusFixer :: Task HTaskStatus -> Maybe (Task TWTaskStatus)
     statusFixer inTask =
         case (taskStatus inTask, taskStatus (NT.unpack twTask)) of
+            -- A Taskwarrior recurring task has no equivalent representation in Habitica
+            -- and should only exist as a "template" to create new tasks on the Taskwarrior
+            -- side. If we hit this path, something went very wrong (e.g. the user manually
+            -- entered a Habitica ID into a recurring task). This branch "resets" the recurring
+            -- task by returning the original task without the Habitica updates and removing the
+            -- Habitica ID.
+            (_, TWRecurring) ->
+                let
+                    (TaskwarriorTask task) = twTask
+                in
+                    Just task { taskHabiticaId = Nothing }
             (HPending, TWWaiting) -> Just inTask { taskStatus = TWWaiting }
             (HPending, _)         -> Just inTask { taskStatus = TWPending }
             (HCompleted, _)       -> Just inTask { taskStatus = TWCompleted }

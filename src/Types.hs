@@ -59,6 +59,7 @@ data TaskDifficulty
 data TWTaskStatus
     = TWPending
     | TWWaiting
+    | TWRecurring
     | TWCompleted
     | TWDeleted
     deriving (Show, Eq)
@@ -195,6 +196,7 @@ instance FromJSON TaskwarriorTask where
                      "waiting"   -> return TWWaiting
                      "completed" -> return TWCompleted
                      "deleted"   -> return TWDeleted
+                     "recurring" -> return TWRecurring
                      _           -> fail "Invalid status.") <*>
             (o .:? "due" >>=
              maybe (return Nothing) (fmap Just . textToTime taskwarriorTimeFormat)) <*>

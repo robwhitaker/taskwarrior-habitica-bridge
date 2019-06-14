@@ -18,6 +18,7 @@ extra-source-files:
 
 executable taskbitica
   main-is:             Main.hs
+  ghc-options:         -fwarn-incomplete-patterns -Werror
   other-modules:       Types
                      , Web
                      , TaskUtils

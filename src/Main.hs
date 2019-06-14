@@ -126,57 +126,65 @@ modifyTaskwarriorTask ::
     -> ExceptT String IO (TaskwarriorTask, Maybe HabiticaUserStats, Maybe ItemDrop)
 modifyTaskwarriorTask headers (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask) =
     case (taskStatus oldTask, taskStatus newTask) of
-        -- The task remains deleted and doesn't exist on Habitica,
-        -- so return the task unchanged
-        (TWDeleted, TWDeleted) -> return (twTask, Nothing, Nothing)
+        (oldStatus, newStatus)
+            -- The task doesn't and shouldn't exist on Habitica,
+            -- so return the task unchanged
+            | notOnHabitica oldStatus && notOnHabitica newStatus ->
+                return (twTask, Nothing, Nothing)
 
-        -- A previously deleted task is being brought back on the Taskwarrior
-        -- side, so a new Habitica task must be created since we can't recover
-        -- a deleted Habitica task
-        (TWDeleted, newStatus) -> do
-            -- Ignore the stats and drops as we are creating a new task so they are irrelevant
-            newTwTask@(TaskwarriorTask Task{taskHabiticaId}) <- pushTaskwarriorTask headers twTask
-            hId <- requireHabiticaId
-                "Attempt to push task to Habitica resulted in a local task with no UUID."
-                taskHabiticaId
-            if newStatus == TWCompleted then do
-                (ResponseData _ maybeNewStats maybeItemDrop) <-
-                    liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
-                        >>= betterResponseHandle
-                return (newTwTask, maybeNewStats, maybeItemDrop)
-            else
+            -- The task previously existed on Habitica but should not anymore,
+            -- so delete it from Habitica, unset the Habitica ID in Taskwarrior,
+            -- and return the Taskwarrior task
+            | onHabitica oldStatus && notOnHabitica newStatus -> do
+                case taskHabiticaId oldTask of
+                    Nothing -> return ()
+                    Just hId ->
+                        -- We don't need the response, but we want to validate that the
+                        -- request went through okay
+                        void $ liftIO (runHabiticaReq (habiticaDeleteTask headers hId))
+                            >>= betterResponseHandle
+                return
+                    ( TaskwarriorTask newTask { taskHabiticaId = Nothing }
+                    , Nothing
+                    , Nothing
+                    )
+
+            -- A task that previously did not exist on Habitica now has a status
+            -- that should exist on Habitica, so create a new task on Habitica
+            -- and return the Taskwarrior task with the new Habitica ID
+            | notOnHabitica oldStatus && onHabitica newStatus -> do
+                newTwTask@(TaskwarriorTask Task{taskHabiticaId}) <- pushTaskwarriorTask headers twTask
+                hId <- requireHabiticaId
+                    "Attempt to push task to Habitica resulted in a local task with no UUID."
+                    taskHabiticaId
+                if newStatus == TWCompleted then do
+                    (ResponseData _ maybeNewStats maybeItemDrop) <-
+                        liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
+                            >>= betterResponseHandle
+                    return (newTwTask, maybeNewStats, maybeItemDrop)
+                else
+                    return (newTwTask, Nothing, Nothing)
+
+            -- When going from Completed to Pending or Waiting, "uncheck" the task
+            -- on Habitica
+            | completed oldStatus && pending newStatus ->
+                scoreOnHabitica Down
+
+            -- When going from Pending or Waiting to Completed, "check" the task
+            -- on Habitica
+            | pending oldStatus && completed newStatus ->
+                scoreOnHabitica Up
+
+            -- The task status didn't change so just update the details
+            | otherwise -> do
+                newTwTask <- pushTaskwarriorTask headers twTask
                 return (newTwTask, Nothing, Nothing)
-
-        -- When going from Completed to Pending or Waiting, "uncheck" the task
-        -- on Habitica.
-        (TWCompleted, TWPending) -> scoreOnHabitica Down
-        (TWCompleted, TWWaiting) -> scoreOnHabitica Down
-
-        -- When going from Pending or Waiting to Completed, "check" the task
-        -- on Habitica.
-        (TWPending, TWCompleted) -> scoreOnHabitica Up
-        (TWWaiting, TWCompleted) -> scoreOnHabitica Up
-
-        -- If the task was deleted (and wasn't already deleted, checked for above)
-        -- delete the task on Habitica.
-        (_, TWDeleted) -> do
-            hId <- getId
-            -- We don't need the response, but we want to validate that the
-            -- request went through okay.
-            _ <- liftIO (runHabiticaReq (habiticaDeleteTask headers hId))
-                >>= betterResponseHandle
-            -- Unset the Habitica ID since the task no longer exists
-            return
-                (TaskwarriorTask newTask{taskHabiticaId = Nothing}
-                , Nothing
-                , Nothing
-                )
-
-        -- The task status didn't change so just update the details.
-        (_, _) -> do
-            newTwTask <- pushTaskwarriorTask headers twTask
-            return (newTwTask, Nothing, Nothing)
   where
+    onHabitica = (`elem` [TWPending, TWWaiting, TWCompleted])
+    notOnHabitica = (`elem` [TWRecurring, TWDeleted])
+    completed = (== TWCompleted)
+    pending = (`elem` [TWPending, TWWaiting])
+
     requireHabiticaId :: Monad m => String -> Maybe UUID -> ExceptT String m UUID
     requireHabiticaId errMsg = maybe (throwError errMsg) return
 
@@ -250,7 +258,6 @@ addHook :: HabiticaHeaders -> ExceptT String IO ()
 addHook headers = do
     taskJson <- liftIO getLine
     task <- liftEither $ eitherDecode (fromString taskJson)
-    -- Stats shouldn't change on adding a task, so ignore them
     newTask <- pushTaskwarriorTask headers task
     liftIO $ putStrLn $ B.toString $ encode newTask
 
