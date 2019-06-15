@@ -34,7 +34,8 @@ import qualified Data.UUID                 as UUID
 
 import qualified Network.HTTP.Req          as Req
 
-import           System.Environment        (getArgs)
+import           System.Environment        (getArgs, lookupEnv, setEnv,
+                                            unsetEnv)
 import           System.Exit               (ExitCode (..), exitFailure)
 import qualified System.Process            as Process
 
@@ -55,7 +56,7 @@ twCmd cmd = twCmd' cmd ""
 twCmd' :: [String] -> String -> (String -> a) -> IO a
 twCmd' cmd stdin f =
     (\(_, result, _) -> f result)
-        <$> Process.readProcessWithExitCode "task" ("rc.hooks=off" : cmd) stdin
+        <$> Process.readProcessWithExitCode "task" cmd stdin
 
 twGet :: String -> IO Text
 twGet str = twCmd ["_get", str] (T.strip . T.pack)
@@ -212,6 +213,9 @@ betterResponseHandle res =
                 ("Something went wrong while parsing the response from Habitica: " <> errText)
         DataResponse dataRes -> return dataRes
 
+envVarName :: String
+envVarName = "TASKBITICA_RUNNING"
+
 main :: IO ()
 main = runAndFailOnError $ do
     twVersion <- liftIO twGetVersion
@@ -225,17 +229,26 @@ main = runAndFailOnError $ do
     headers <- getHabiticaHeaders
     args <- liftIO getArgs
     case args of
-        ("sync":rest) ->
-            let
-                args = foldl (\acc arg ->
+        ("sync":rest) -> do
+            let args = foldl (\acc arg ->
                     case arg of
                         "--verbose" -> acc{syncVerbose = True}
                         _           -> acc
                     ) (SyncArgs False) rest
-            in
+            -- Set an environment variable so hooks know not to run during sync
+            liftIO $ setEnv envVarName "1"
             runReaderT (sync headers) args
-        ("add":_) -> addHook headers
-        ("modify":_) -> modifyHook headers
+            liftIO $ unsetEnv envVarName
+        ("add":_) -> do
+            maybeEnvVar <- liftIO $ lookupEnv envVarName
+            case maybeEnvVar of
+                Nothing -> addHook headers
+                Just _  -> liftIO $ getLine >>= putStrLn
+        ("modify":_) -> do
+            maybeEnvVar <- liftIO $ lookupEnv envVarName
+            case maybeEnvVar of
+                Nothing -> modifyHook headers
+                Just _  -> liftIO $ getLine >> getLine >>= putStrLn
         _ -> throwError "You must provide a valid action: sync, add, modify"
 
 runAndFailOnError :: ExceptT String IO a -> IO a
@@ -244,6 +257,7 @@ runAndFailOnError m = do
     case result of
         Left err -> do
             putStrLn $ "ERROR: " <> err
+            liftIO $ unsetEnv envVarName
             exitFailure
         Right val -> return val
 
