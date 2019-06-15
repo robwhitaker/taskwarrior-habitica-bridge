@@ -3,12 +3,14 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TypeFamilies          #-}
 
 
 module Main where
 
-import           Control.Monad             (foldM_, forM_, void, when)
+import           Control.Exception         (tryJust)
+import           Control.Monad             (foldM_, forM_, guard, void, when)
 import           Control.Monad.Except      (ExceptT, liftEither, runExceptT,
                                             throwError)
 import           Control.Monad.IO.Class    (liftIO)
@@ -19,12 +21,13 @@ import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
 import           Control.Newtype.Generics  (Newtype, O)
 import qualified Control.Newtype.Generics  as NT
 
-import           Data.Aeson                (eitherDecode, encode)
+import           Data.Aeson                (decodeFileStrict', eitherDecode,
+                                            encode, encodeFile)
 import           Data.Aeson.Types          (emptyObject)
 import qualified Data.ByteString.Lazy.UTF8 as B
 import           Data.HashMap.Strict       (HashMap)
 import qualified Data.HashMap.Strict       as HM
-import           Data.Maybe                (fromMaybe, isNothing)
+import           Data.Maybe                (catMaybes, fromMaybe, isNothing)
 import           Data.Set                  (Set)
 import qualified Data.Set                  as Set
 import           Data.String               (fromString)
@@ -34,9 +37,12 @@ import qualified Data.UUID                 as UUID
 
 import qualified Network.HTTP.Req          as Req
 
+import           System.Directory          (getHomeDirectory, removeFile)
 import           System.Environment        (getArgs, lookupEnv, setEnv,
                                             unsetEnv)
 import           System.Exit               (ExitCode (..), exitFailure)
+import           System.FilePath.Posix     ((</>))
+import           System.IO.Error           (isDoesNotExistError)
 import qualified System.Process            as Process
 
 import           TaskUtils
@@ -59,7 +65,7 @@ twCmd' cmd stdin f =
         <$> Process.readProcessWithExitCode "task" cmd stdin
 
 twGet :: String -> IO Text
-twGet str = twCmd ["_get", str] (T.strip . T.pack)
+twGet str = twCmd ["rc.hooks=off", "_get", str] (T.strip . T.pack)
 
 twExport :: [String] -> IO [TaskwarriorTask]
 twExport filters =
@@ -249,6 +255,10 @@ main = runAndFailOnError $ do
             case maybeEnvVar of
                 Nothing -> modifyHook headers
                 Just _  -> liftIO $ getLine >> getLine >>= putStrLn
+        ("exit":_) -> liftIO $ do
+            statCache <- getStatsCacheFilePath
+            tryJust (guard . isDoesNotExistError) (removeFile statCache) >>=
+                const (return ())
         _ -> throwError "You must provide a valid action: sync, add, modify"
 
 runAndFailOnError :: ExceptT String IO a -> IO a
@@ -285,12 +295,20 @@ modifyHook headers = do
     if toHabiticaTask oldTask == toHabiticaTask newTask then
         printTask newTask
     else do
-        oldUserStats <- fetchStats headers
+        maybeDecodedFile <- liftIO getHabiticaStatsFromCacheFile
+
+        oldUserStats <- case maybeDecodedFile of
+            Nothing    -> fetchStats headers
+            Just stats -> return stats
+
         (newerTask, maybeStats, maybeDrop) <- modifyTaskwarriorTask headers oldTask newTask
 
         case maybeStats of
             Nothing -> return ()
-            Just newStats -> liftIO $ mapM_ putStrLn (getUserStatDiffs oldUserStats newStats)
+            Just newStats -> liftIO $ do
+                dataFile <- getStatsCacheFilePath
+                encodeFile dataFile newStats
+                mapM_ putStrLn (getUserStatDiffs oldUserStats newStats)
 
         case maybeDrop of
             Nothing -> return ()
@@ -299,6 +317,27 @@ modifyHook headers = do
         printTask newerTask
   where
     printTask = liftIO . putStrLn . B.toString . encode
+
+getHabiticaStatsFromCacheFile :: IO (Maybe HabiticaUserStats)
+getHabiticaStatsFromCacheFile = do
+    dataFile <- getStatsCacheFilePath
+    tryJust (guard . isDoesNotExistError) (decodeFileStrict' dataFile)
+        >>= either (const $ return Nothing) return
+
+getStatsCacheFilePath :: IO FilePath
+getStatsCacheFilePath =
+    (</> "cached_habitica_stats.json") <$> getTaskwarriorDataDir
+
+getTaskwarriorDataDir :: IO FilePath
+getTaskwarriorDataDir = do
+    dataDir <- T.unpack <$> twGet "rc.data.location"
+    expandPath dataDir
+  where expandPath :: FilePath -> IO FilePath
+        expandPath fp =
+            if take 1 fp == "~"
+                then do home <- getHomeDirectory
+                        return $ home </> dropWhile (=='/') (drop 1 fp)
+                else return fp
 
 sync :: HabiticaHeaders -> ReaderT SyncArgs (ExceptT String IO) ()
 sync headers = do
@@ -421,18 +460,17 @@ sync headers = do
 
 getUserStatDiffs :: HabiticaUserStats -> HabiticaUserStats -> [String]
 getUserStatDiffs old new
-    | lvlDiff /= 0 =
+    | lvlDiff /= 0 = catMaybes
         [ if lvlDiff > 0 then
-            "You leveled up! You are now level " <> show (statsLvl new) <> "!"
+            Just $ "You leveled up! You are now level " <> show (statsLvl new) <> "!"
           else
-            "You lost a level. You are now level " <> show (statsLvl new) <> "."
+            Just $ "You lost a level. You are now level " <> show (statsLvl new) <> "."
         , mkDiffText "hp" statsHp
         , mkDiffText "mp" statsMp
         , mkDiffText "gold" statsGp
         ]
-    | otherwise =
-        [ mkDiffText "hp" statsHp
-        , mkDiffText "mp" statsMp
+    | otherwise = catMaybes
+        [ mkDiffText "mp" statsMp
         , mkDiffText "gold" statsGp
         , mkDiffText "exp" statsExp
         ]
@@ -440,11 +478,11 @@ getUserStatDiffs old new
     lvlDiff = statsLvl new - statsLvl old
 
     mkDiffText field getter
-        | diff == 0 = "You have " <> prettyShowField new <> " " <> field <> "."
+        | diff == 0 = Nothing
         | otherwise =
             let (dir, punc) = if diff > 0 then ("gained", "!") else ("lost", ".")
                 diffVal = prettyShow (abs diff)
-            in mconcat
+            in Just $ mconcat
                 [ "You ", dir, " ", diffVal, " ", field, punc
                 , " (current ", field, ": ", prettyShowField new, ")"
                 ]

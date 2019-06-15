@@ -241,6 +241,17 @@ instance FromJSON HabiticaUserStats where
             stats .: "gp" <*>
             stats .: "lvl"
 
+instance ToJSON HabiticaUserStats where
+    toJSON stats =
+        object
+            [ "hp" .= statsHp stats
+            , "mp" .= statsMp stats
+            , "exp" .= statsExp stats
+            , "gp" .= statsGp stats
+            , "lvl" .= statsLvl stats
+            ]
+
+
 newtype ItemDrop = ItemDrop Text
   deriving (Show)
 
