@@ -4,7 +4,27 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies        #-}
 
-module Web where
+module Web
+    (
+    -- * Types
+      HabiticaHeaders
+    , HabiticaRequest
+    , ScoreDirection(..)
+
+    -- * Create headers for requests
+    , habiticaHeaders
+
+    -- * Creating requests
+    , habiticaCreateOrUpdateRequest
+    , habiticaDeleteTask
+    , habiticaGetTask
+    , habiticaGetTasks
+    , habiticaGetUserStats
+    , habiticaScoreTask
+
+    -- * Running the requests
+    , runHabiticaReq
+    ) where
 
 import           Control.Concurrent   (threadDelay)
 import           Control.Exception    (catch)
