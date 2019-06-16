@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies        #-}
@@ -18,9 +19,10 @@ import           Data.Text            (Text)
 import qualified Data.Text            as T
 import qualified Data.UUID            as UUID
 
-import           Network.HTTP.Req     (HttpResponse (..), Option, Req,
-                                       ReqBodyJson (..), Scheme (Https), Url,
-                                       (/:), (=:))
+import           Network.HTTP.Client  (HttpException (..), requestHeaders)
+import           Network.HTTP.Req     (HttpException (..), HttpResponse (..),
+                                       Option, Req, ReqBodyJson (..),
+                                       Scheme (Https), Url, (/:), (=:))
 import qualified Network.HTTP.Req     as Req
 
 import           Types
@@ -77,9 +79,24 @@ runHabiticaReq req = do
     -- Add a pause before Habitica requests so the server doesn't choke when more than one
     -- request happens
     threadDelay 1000000
-    -- Do some simple error handling to prevent the user's API key from getting spit into
+    -- Do some error handling to prevent the user's API key from getting spit into
     -- the terminal on a failure
-    catch (either ParseError id <$> Req.runReq reqConf req) $ return . HttpException
+    catch (either ParseError id <$> Req.runReq reqConf req) $ return . \case
+        VanillaHttpException (HttpExceptionRequest request err) ->
+            let requestApiMasked = request {
+                    requestHeaders = fmap (\header@(headerName, headerVal) ->
+                        if headerName == "x-api-key"
+                            then (headerName, "(hidden)")
+                            else header
+                    ) (requestHeaders request)
+                }
+            in
+                HttpException (VanillaHttpException (HttpExceptionRequest requestApiMasked err))
+
+        otherVanilla@(VanillaHttpException _) ->
+            HttpException otherVanilla
+
+        JsonHttpException str -> ParseError str
   where
     reqConf = Req.defaultHttpConfig {Req.httpConfigCheckResponse = \_ _ _ -> Nothing}
 
