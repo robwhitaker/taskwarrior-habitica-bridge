@@ -5,19 +5,20 @@ module TaskUtils where
 import           Control.Newtype.Generics (Newtype, O)
 import qualified Control.Newtype.Generics as NT
 
-import           Data.Aeson.Types         (Value, emptyObject)
+import           Data.Aeson.Types         (Object)
+import qualified Data.HashMap.Strict      as HM
 import           Data.Maybe               (fromJust)
 
 import           Types
 
 convertTask
     :: (Newtype n1, Newtype n2, O n1 ~ Task a, O n2 ~ Task b)
-    => (Task a -> Maybe (Task b)) -> n1 -> Value -> Maybe n2
+    => (Task a -> Maybe (Task b)) -> n1 -> Object -> Maybe n2
 convertTask f task json =
     f (NT.unpack task) >>= (\newTask -> Just $ NT.pack (newTask {rawJson = json}))
 
 toHabiticaTask :: TaskwarriorTask -> Maybe HabiticaTask
-toHabiticaTask task = convertTask statusFixer task emptyObject
+toHabiticaTask task = convertTask statusFixer task HM.empty
   where
     statusFixer :: Task TWTaskStatus -> Maybe (Task HTaskStatus)
     statusFixer inTask =
@@ -29,7 +30,7 @@ toHabiticaTask task = convertTask statusFixer task emptyObject
             TWRecurring -> Nothing
 
 toTaskwarriorTask :: HabiticaTask -> TaskwarriorTask
-toTaskwarriorTask task = fromJust $ convertTask statusFixer task emptyObject
+toTaskwarriorTask task = fromJust $ convertTask statusFixer task HM.empty
   where
     statusFixer :: Task HTaskStatus -> Maybe (Task TWTaskStatus)
     statusFixer inTask =
@@ -65,4 +66,4 @@ updateTaskwarriorTask hTask twTask = fromJust $ convertTask statusFixer hTask (r
 -- since the fields are optional according to the
 -- API.
 updateHabiticaTask :: TaskwarriorTask -> HabiticaTask -> Maybe HabiticaTask
-updateHabiticaTask twTask hTask = toHabiticaTask twTask
+updateHabiticaTask twTask _ = toHabiticaTask twTask

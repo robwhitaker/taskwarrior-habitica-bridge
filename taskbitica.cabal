@@ -18,7 +18,17 @@ extra-source-files:
 
 executable taskbitica
   main-is:             Main.hs
-  ghc-options:         -fwarn-incomplete-patterns -Werror
+  ghc-options:         -Wall
+                       -fwarn-incomplete-uni-patterns
+                       -fwarn-tabs
+                       -fwarn-incomplete-record-updates
+                       -fno-warn-missing-signatures
+                       -fno-warn-type-defaults
+                       -Werror
+                       -Wwarn=unused-imports
+                       -Wwarn=unused-local-binds
+                       -Wwarn=unused-matches
+                       -Wwarn=unused-do-bind
   other-modules:       Types
                      , Web
                      , TaskUtils

@@ -16,26 +16,21 @@ import           Control.Monad.Except      (ExceptT, liftEither, runExceptT,
 import           Control.Monad.IO.Class    (liftIO)
 import           Control.Monad.Reader      (ReaderT, ask, runReaderT)
 import           Control.Monad.Trans.Class (lift)
-import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
 
 import           Control.Newtype.Generics  (Newtype, O)
 import qualified Control.Newtype.Generics  as NT
 
 import           Data.Aeson                (decodeFileStrict', eitherDecode,
                                             encode, encodeFile)
-import           Data.Aeson.Types          (emptyObject)
 import qualified Data.ByteString.Lazy.UTF8 as B
 import           Data.HashMap.Strict       (HashMap)
 import qualified Data.HashMap.Strict       as HM
-import           Data.Maybe                (catMaybes, fromMaybe, isNothing)
-import           Data.Set                  (Set)
+import           Data.Maybe                (catMaybes, fromMaybe)
 import qualified Data.Set                  as Set
 import           Data.String               (fromString)
 import           Data.Text                 (Text)
 import qualified Data.Text                 as T
 import qualified Data.UUID                 as UUID
-
-import qualified Network.HTTP.Req          as Req
 
 import           System.Directory          (getHomeDirectory, removeFile)
 import           System.Environment        (getArgs, lookupEnv, setEnv,
@@ -118,7 +113,7 @@ pushTaskwarriorTask headers taskwarriorTask@(TaskwarriorTask twTask) = do
     newHabiticaId <-
         case toHabiticaTask taskwarriorTask of
             Nothing -> return Nothing
-            Just htask@(HabiticaTask task) -> do
+            Just htask -> do
                 let req = habiticaCreateOrUpdateRequest headers htask
                 (ResponseData (HabiticaTask Task{taskHabiticaId}) _ _) <-
                     liftIO (runHabiticaReq req) >>= betterResponseHandle
@@ -236,14 +231,14 @@ main = runAndFailOnError $ do
     args <- liftIO getArgs
     case args of
         ("sync":rest) -> do
-            let args = foldl (\acc arg ->
+            let syncArgs = foldl (\acc arg ->
                     case arg of
                         "--verbose" -> acc{syncVerbose = True}
                         _           -> acc
                     ) (SyncArgs False) rest
             -- Set an environment variable so hooks know not to run during sync
             liftIO $ setEnv envVarName "1"
-            runReaderT (sync headers) args
+            runReaderT (sync headers) syncArgs
             liftIO $ unsetEnv envVarName
         ("add":_) -> do
             maybeEnvVar <- liftIO $ lookupEnv envVarName
@@ -375,7 +370,7 @@ sync headers = do
                 putStrLn "    Status: Created on Habitica."
                 putStrLn "    Action: Importing into Taskwarrior."
                 putStrLn ""
-                twImport (toTaskwarriorTask habiticaTask)
+                void $ twImport (toTaskwarriorTask habiticaTask)
                 return stats
 
             -- The task does not exist on Habitica, but it was previously synced with Taskwarrior.
@@ -430,7 +425,7 @@ sync headers = do
             -- the Taskwarrior task with the Habitica details and import it back
             -- into Taskwarrior
             liftIO $ putStrLn "    Action: Habitica task is most recently modified. Updating in Taskwarrior"
-            liftIO $ twImport (updateTaskwarriorTask habiticaTask taskwarriorTask)
+            void $ liftIO $ twImport (updateTaskwarriorTask habiticaTask taskwarriorTask)
             return Nothing
         else do
             -- If the task was modified most recently on Taskwarrior, we can use the
@@ -439,8 +434,7 @@ sync headers = do
             liftIO $ putStrLn "    Action: Taskwarrior task is most recently modified. Updating on Habitica."
             (newTwTask, maybeStats, maybeDrop) <-
                 modifyTaskwarriorTask headers (toTaskwarriorTask habiticaTask) taskwarriorTask
-
-            liftIO $ twImport newTwTask
+            void $ liftIO $ twImport newTwTask
 
             case maybeStats of
                 Nothing -> return ()
@@ -487,6 +481,6 @@ getUserStatDiffs old new
                 , " (current ", field, ": ", prettyShowField new, ")"
                 ]
       where diff = getter new - getter old
-            rounded n = fromIntegral (round (n * 100)) / 100
+            rounded n = fromIntegral (round (n * 100) :: Int) / 100
             prettyShow = show . rounded
             prettyShowField = prettyShow . getter

@@ -28,11 +28,9 @@ module Web
 
 import           Control.Concurrent   (threadDelay)
 import           Control.Exception    (catch)
-import           Control.Monad        (void)
 
 import           Data.Aeson           (parseJSON)
-import           Data.Aeson.Types     (FromJSON, Value (Null), parseEither)
-import           Data.ByteString.Lazy (ByteString)
+import           Data.Aeson.Types     (FromJSON, Value, parseEither)
 import qualified Data.ByteString.Lazy as B
 import           Data.String          (fromString)
 import           Data.Text            (Text)
@@ -40,9 +38,9 @@ import qualified Data.Text            as T
 import qualified Data.UUID            as UUID
 
 import           Network.HTTP.Client  (HttpException (..), requestHeaders)
-import           Network.HTTP.Req     (HttpException (..), HttpResponse (..),
-                                       Option, Req, ReqBodyJson (..),
-                                       Scheme (Https), Url, (/:), (=:))
+import           Network.HTTP.Req     (HttpException (..), Option, Req,
+                                       ReqBodyJson (..), Scheme (Https), Url,
+                                       (/:))
 import qualified Network.HTTP.Req     as Req
 
 import           Types
@@ -104,7 +102,7 @@ runHabiticaReq req = do
     catch (either ParseError id <$> Req.runReq reqConf req) $ return . \case
         VanillaHttpException (HttpExceptionRequest request err) ->
             let requestApiMasked = request {
-                    requestHeaders = fmap (\header@(headerName, headerVal) ->
+                    requestHeaders = fmap (\header@(headerName, _) ->
                         if headerName == "x-api-key"
                             then (headerName, "(hidden)")
                             else header
@@ -128,8 +126,8 @@ habiticaCreateOrUpdateRequest (HabiticaHeaders headers) habiticaTask@(HabiticaTa
   where
     mkReq =
         case taskHabiticaId task of
-            Just id -> Req.req Req.PUT (taskEndpoint id)
-            Nothing -> Req.req Req.POST tasksEndpoint
+            Just hId -> Req.req Req.PUT (taskEndpoint hId)
+            Nothing  -> Req.req Req.POST tasksEndpoint
 
 habiticaGetTasks :: HabiticaHeaders -> Maybe Text -> HabiticaRequest [HabiticaTask]
 habiticaGetTasks (HabiticaHeaders headers) maybeQueryParam =

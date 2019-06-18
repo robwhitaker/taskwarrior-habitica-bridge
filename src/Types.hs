@@ -7,7 +7,6 @@ import           GHC.Generics
 
 import           Control.Applicative       (empty, (<|>))
 
-import           Control.Monad.Trans.Class (lift)
 import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
 
 import           Control.Newtype.Generics  (Newtype)
@@ -16,7 +15,7 @@ import qualified Control.Newtype.Generics  as NT
 import           Data.Aeson
 import           Data.Aeson.Types
 import qualified Data.HashMap.Strict       as HM
-import           Data.Maybe                (fromJust, fromMaybe, isJust)
+import           Data.Maybe                (fromJust, fromMaybe)
 import           Data.Text                 (Text)
 import qualified Data.Text                 as T
 import           Data.Time                 (UTCTime)
@@ -34,7 +33,7 @@ data Task status = Task
     , taskStatus     :: status
     , taskDue        :: Maybe UTCTime
     , taskModified   :: UTCTime
-    , rawJson        :: Value
+    , rawJson        :: Object
     } deriving (Show)
 
 -- The Eq instance ignores the modified field as *when* the tasks changed
@@ -132,8 +131,7 @@ instance FromJSON HabiticaTask where
                             1.5 -> return Medium
                             2 -> return Hard
                             _ ->
-                                fail
-                                    "Invalid number provided as task difficulty (priority)."
+                                fail "Invalid number provided as task difficulty (priority)."
                 isCompleted <- o .: "completed"
                 status <-
                     if type_ == Daily
@@ -147,8 +145,7 @@ instance FromJSON HabiticaTask where
                                  else return HPending
                 due <- o .:? "date" >>= text2Time
                 modified <- o .: "updatedAt" >>= textToTime habiticaTimeFormat
-                let rawJson = Object o
-                return $ Task hId type_ text priority status due modified rawJson
+                return $ Task hId type_ text priority status due modified o
       where
         text2Time Nothing     = return Nothing
         -- Because sometimes Habitica likes to represent "no time" as
@@ -201,7 +198,7 @@ instance FromJSON TaskwarriorTask where
             (o .:? "due" >>=
              maybe (return Nothing) (fmap Just . textToTime taskwarriorTimeFormat)) <*>
             (o .: "modified" >>= textToTime taskwarriorTimeFormat) <*>
-            return (Object o)
+            return o
 
 instance ToJSON TaskwarriorTask where
     -- Taskwarrior's "import" functionality removes all fields that
@@ -209,8 +206,8 @@ instance ToJSON TaskwarriorTask where
     -- effectively remove the field
     toJSON (TaskwarriorTask task) = Object $ HM.filter (/= Null) (HM.union newObj oldObj)
       where
-        (Object newObj) =
-            object
+        newObj =
+            HM.fromList
                 [ "description" .= taskText task
                 , "habitica_task_type" .= taskType task
                 , "habitica_uuid" .= taskHabiticaId task
@@ -218,10 +215,7 @@ instance ToJSON TaskwarriorTask where
                 , "status" .= (String . T.drop 2 . T.toLower . T.pack . show . taskStatus) task
                 , "due" .= (timeToText taskwarriorTimeFormat <$> taskDue task)
                 ]
-        -- TODO: Is there a safer way to do this? This will fail
-        --       if the Value isn't an Object, though that can only
-        --       happen if Tasks are constructed manually.
-        (Object oldObj) = rawJson task
+        oldObj = rawJson task
 
 data HabiticaUserStats = HabiticaUserStats
     { statsHp  :: Double
@@ -303,7 +297,7 @@ instance Functor ResponseData where
 
 data HabiticaResponse a
     = DataResponse (ResponseData a)
-    | ErrorResponse { err        :: Text
+    | ErrorResponse { errKey     :: Text
                     , errMessage :: Text }
     | ParseError String
     | HttpException HttpException
@@ -328,7 +322,7 @@ instance (FromJSON a) => FromJSON (HabiticaResponse a) where
       where
         maybeParse :: FromJSON a => Object -> Text -> Parser (Maybe a)
         maybeParse obj txt =
-            obj .: txt >>= \json -> parseJSON json <|> return Nothing
+            obj .: txt >>= \inJson -> parseJSON inJson <|> return Nothing
 
 {- CHANGE TYPES
 -
