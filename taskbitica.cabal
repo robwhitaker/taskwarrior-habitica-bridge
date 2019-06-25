@@ -32,6 +32,8 @@ executable taskbitica
   other-modules:       Types
                      , Web
                      , TaskUtils
+                     , Taskwarrior
+                     , App
   build-depends:       base
                      , aeson
                      , text
