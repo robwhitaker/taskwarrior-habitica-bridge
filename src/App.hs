@@ -37,6 +37,7 @@ import qualified Data.Text              as T
 
 import           Taskwarrior            (Taskwarrior (..))
 import qualified Taskwarrior
+import           Types                  (Error)
 import           Web                    (HabiticaHeaders)
 import qualified Web
 
@@ -80,8 +81,6 @@ data Cmd
     | Sync
 
 -- Type aliases for our app
-
-type Error = String
 
 type AppReader = MonadReader Env
 

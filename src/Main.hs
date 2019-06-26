@@ -36,7 +36,7 @@ import qualified System.Exit               as Exit
 import qualified System.IO.Error           as IOError
 
 import           App                       (App, AppError, AppReader, Args (..),
-                                            Cmd (..), Env (..), Error)
+                                            Cmd (..), Env (..))
 import qualified App
 import           TaskUtils
 import           Taskwarrior               (Taskwarrior (..))

@@ -23,7 +23,7 @@ import qualified Data.Text                 as T
 import qualified System.Directory          as Directory
 import qualified System.Process            as Process
 
-import           Types                     (TaskwarriorTask)
+import           Types                     (Error, TaskwarriorTask)
 
 data Taskwarrior = Taskwarrior
     { task :: [String] -> IO String
@@ -33,7 +33,7 @@ data Taskwarrior = Taskwarrior
     , taskImport :: TaskwarriorTask -> IO String
     }
 
-requireTaskwarrior :: (MonadError String m, MonadIO m) => String -> m Taskwarrior
+requireTaskwarrior :: (MonadError Error m, MonadIO m) => String -> m Taskwarrior
 requireTaskwarrior minVersion = do
     maybeTaskCmd <- liftIO $ Directory.findExecutable "task"
     when (Maybe.isNothing maybeTaskCmd)
@@ -64,7 +64,7 @@ taskGet' str =
     T.unpack . T.strip . T.pack
         <$> task' ["rc.hooks=off", "_get", str]
 
-taskExport' :: (MonadError String m, MonadIO m) => [String] -> m [TaskwarriorTask]
+taskExport' :: (MonadError Error m, MonadIO m) => [String] -> m [TaskwarriorTask]
 taskExport' filters = do
     exportedTask <- liftIO $ task' (filters ++ ["export"])
     liftEither . Aeson.eitherDecode . String.fromString $ exportedTask
