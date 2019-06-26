@@ -21,20 +21,19 @@ import           Control.Monad.Reader      (asks)
 import           Control.Newtype.Generics  (Newtype, O)
 import qualified Control.Newtype.Generics  as NT
 
-import           Data.Aeson                (decodeFileStrict', eitherDecode,
-                                            encode, encodeFile)
+import qualified Data.Aeson                as Aeson
 import qualified Data.ByteString.Lazy.UTF8 as B
 import           Data.HashMap.Strict       (HashMap)
 import qualified Data.HashMap.Strict       as HM
-import           Data.Maybe                (catMaybes, fromMaybe)
+import qualified Data.Maybe                as Maybe
 import qualified Data.Set                  as Set
-import           Data.String               (fromString)
+import qualified Data.String               as String
 import qualified Data.Text                 as T
 import qualified Data.UUID                 as UUID
 
-import           System.Directory          (removeFile)
-import           System.Exit               (exitFailure)
-import           System.IO.Error           (isDoesNotExistError)
+import qualified System.Directory          as Dir
+import qualified System.Exit               as Exit
+import qualified System.IO.Error           as IOError
 
 import           App                       (App, AppError, AppReader, Args (..),
                                             Cmd (..), Env (..), Error)
@@ -80,14 +79,14 @@ main = App.runProgram handleError $ \case
 handleError :: Error -> IO ()
 handleError err = do
     putStrLn $ "Error: " <> err
-    exitFailure
+    Exit.exitFailure
 
 -- Helper functions
 
 getHabiticaStatsFromCacheFile :: (AppReader m, MonadIO m) => m (Maybe HabiticaUserStats)
 getHabiticaStatsFromCacheFile = do
     dataFile <- asks envHabiticaUserStatsCache
-    liftIO $ tryJust (guard . isDoesNotExistError) (decodeFileStrict' dataFile)
+    liftIO $ tryJust (guard . IOError.isDoesNotExistError) (Aeson.decodeFileStrict' dataFile)
         >>= either (const $ return Nothing) return
 
 {- Return a list of taskwarrior tasks:
@@ -123,7 +122,7 @@ fetchStats = do
 
 getUserStatDiffs :: HabiticaUserStats -> HabiticaUserStats -> [String]
 getUserStatDiffs old new
-    | lvlDiff /= 0 = catMaybes
+    | lvlDiff /= 0 = Maybe.catMaybes
         [ if lvlDiff > 0 then
             Just $ "You leveled up! You are now level " <> show (statsLvl new) <> "!"
           else
@@ -132,7 +131,7 @@ getUserStatDiffs old new
         , mkDiffText "mp" statsMp
         , mkDiffText "gold" statsGp
         ]
-    | otherwise = catMaybes
+    | otherwise = Maybe.catMaybes
         [ mkDiffText "mp" statsMp
         , mkDiffText "gold" statsGp
         , mkDiffText "exp" statsExp
@@ -267,15 +266,15 @@ modifyTaskwarriorTask (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask)
 addHook :: App ()
 addHook = do
     taskJson <- liftIO getLine
-    task <- liftEither $ eitherDecode (fromString taskJson)
+    task <- liftEither $ Aeson.eitherDecode (String.fromString taskJson)
     newTask <- pushTaskwarriorTask task
-    liftIO $ putStrLn $ B.toString $ encode newTask
+    liftIO $ putStrLn $ B.toString $ Aeson.encode newTask
 
 modifyHook :: App ()
 modifyHook = do
     (oldTaskJson, newTaskJson) <- liftIO $ (,) <$> getLine <*> getLine
-    oldTask <- liftEither $ eitherDecode (fromString oldTaskJson)
-    newTask <- liftEither $ eitherDecode (fromString newTaskJson)
+    oldTask <- liftEither $ Aeson.eitherDecode (String.fromString oldTaskJson)
+    newTask <- liftEither $ Aeson.eitherDecode (String.fromString newTaskJson)
     -- Turn the old and new Taskwarrior tasks into Habitica tasks; if
     -- they are equal, then we don't need to push anything to Habitica.
     if toHabiticaTask oldTask == toHabiticaTask newTask
@@ -294,7 +293,7 @@ modifyHook = do
                 Just newStats -> do
                     dataFile <- asks envHabiticaUserStatsCache
                     liftIO $ do
-                        encodeFile dataFile newStats
+                        Aeson.encodeFile dataFile newStats
                         mapM_ putStrLn (getUserStatDiffs oldUserStats newStats)
 
             case maybeDrop of
@@ -303,12 +302,12 @@ modifyHook = do
 
             printTask newerTask
   where
-    printTask = liftIO . putStrLn . B.toString . encode
+    printTask = liftIO . putStrLn . B.toString . Aeson.encode
 
 exitHook :: App ()
 exitHook = do
     statCache <- asks envHabiticaUserStatsCache
-    liftIO $ tryJust (guard . isDoesNotExistError) (removeFile statCache) >>=
+    liftIO $ tryJust (guard . IOError.isDoesNotExistError) (Dir.removeFile statCache) >>=
         const (return ())
 
 sync :: App ()
@@ -383,7 +382,7 @@ sync = do
                         liftIO $ bothSidesLog habiticaTask taskwarriorTask
                         newStats <- updateFromNewest habiticaTask taskwarriorTask stats
                         liftIO $ putStrLn ""
-                        return $ fromMaybe stats newStats
+                        return $ Maybe.fromMaybe stats newStats
         ) userStats keys
   where
     tasksToHM :: (Newtype n, O n ~ Task status) => [n] -> HashMap (Maybe UUID.UUID) n
