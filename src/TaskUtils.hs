@@ -1,21 +1,34 @@
 {-# LANGUAGE TypeFamilies #-}
 
-module TaskUtils where
+module TaskUtils
+    (
+    -- * Task conversions
+      toHabiticaTask
+    , toTaskwarriorTask
+
+    -- * Task updates
+    , updateHabiticaTask
+    , updateTaskwarriorTask
+    ) where
 
 import           Control.Newtype.Generics (Newtype, O)
 import qualified Control.Newtype.Generics as NT
 
 import           Data.Aeson.Types         (Object)
 import qualified Data.HashMap.Strict      as HM
-import           Data.Maybe               (fromJust)
+import qualified Data.Maybe               as Maybe
 
 import           Types
+
+-- Utility function to convert one task type to another
 
 convertTask
     :: (Newtype n1, Newtype n2, O n1 ~ Task a, O n2 ~ Task b)
     => (Task a -> Maybe (Task b)) -> n1 -> Object -> Maybe n2
 convertTask f task json =
     f (NT.unpack task) >>= (\newTask -> Just $ NT.pack (newTask {rawJson = json}))
+
+-- Specific task conversions
 
 toHabiticaTask :: TaskwarriorTask -> Maybe HabiticaTask
 toHabiticaTask task = convertTask statusFixer task HM.empty
@@ -30,7 +43,7 @@ toHabiticaTask task = convertTask statusFixer task HM.empty
             TWRecurring -> Nothing
 
 toTaskwarriorTask :: HabiticaTask -> TaskwarriorTask
-toTaskwarriorTask task = fromJust $ convertTask statusFixer task HM.empty
+toTaskwarriorTask task = Maybe.fromJust $ convertTask statusFixer task HM.empty
   where
     statusFixer :: Task HTaskStatus -> Maybe (Task TWTaskStatus)
     statusFixer inTask =
@@ -39,8 +52,11 @@ toTaskwarriorTask task = fromJust $ convertTask statusFixer task HM.empty
             HCompleted -> Just inTask { taskStatus = TWCompleted }
             HDeleted   -> Just inTask { taskStatus = TWDeleted }
 
+-- Updating one type of task from another
+
 updateTaskwarriorTask :: HabiticaTask -> TaskwarriorTask -> TaskwarriorTask
-updateTaskwarriorTask hTask twTask = fromJust $ convertTask statusFixer hTask (rawJson $ NT.unpack twTask)
+updateTaskwarriorTask hTask twTask = Maybe.fromJust $
+    convertTask statusFixer hTask (rawJson $ NT.unpack twTask)
   where
     statusFixer :: Task HTaskStatus -> Maybe (Task TWTaskStatus)
     statusFixer inTask =

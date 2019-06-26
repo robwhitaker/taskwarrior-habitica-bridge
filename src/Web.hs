@@ -26,13 +26,15 @@ module Web
     , runHabiticaReq
     ) where
 
-import           Control.Concurrent   (threadDelay)
+import qualified Control.Concurrent   as Concurrent
 import           Control.Exception    (catch)
 
-import           Data.Aeson           (parseJSON)
-import           Data.Aeson.Types     (FromJSON, Value, parseEither)
+import qualified Data.Aeson           as Aeson
+import           Data.Aeson.Types     (FromJSON, Value)
+import qualified Data.Aeson.Types     as Aeson
+
 import qualified Data.ByteString.Lazy as B
-import           Data.String          (fromString)
+import qualified Data.String          as String
 import           Data.Text            (Text)
 import qualified Data.Text            as T
 import qualified Data.UUID            as UUID
@@ -45,7 +47,8 @@ import qualified Network.HTTP.Req     as Req
 
 import           Types
 
-{- ENDPOINT DEFINITIONS  -}
+-- Endpoint definitions
+
 habiticaApiV3 :: Url 'Https
 habiticaApiV3 = Req.https "habitica.com" /: "api" /: "v3"
 
@@ -65,7 +68,8 @@ scoreEndpoint :: UUID -> ScoreDirection -> Url 'Https
 scoreEndpoint (UUID taskId) dir =
     habiticaApiV3 /: "tasks" /: UUID.toText taskId /: "score" /: T.toLower (T.pack $ show dir)
 
-{- HELPER FUNCTIONS -}
+-- Helper functions
+
 newtype HabiticaHeaders =
     HabiticaHeaders (Option 'Https)
 
@@ -75,33 +79,35 @@ habiticaHeaders textUUID textApiKey =
   where
     mkHeaders uuid apiKey =
         HabiticaHeaders $ mconcat
-            [ Req.header "x-api-user" (B.toStrict $ fromString $ UUID.toString uuid)
-            , Req.header "x-api-key" (B.toStrict $ fromString $ UUID.toString apiKey)
+            [ Req.header "x-api-user" (B.toStrict $ String.fromString $ UUID.toString uuid)
+            , Req.header "x-api-key" (B.toStrict $ String.fromString $ UUID.toString apiKey)
             ]
 
 -- Type signature for this is weird, so let GHC figure it out
 toHabiticaRequest f req = do
-    r <- parseEither parseJSON . Req.responseBody <$> req
+    r <- Aeson.parseEither Aeson.parseJSON . Req.responseBody <$> req
     return (fmap (fmap f) r)
 
 ignoreValue :: Value -> ()
 ignoreValue = const ()
 
-{- TYPE ALIASES -}
+-- Type aliases
 
 type HabiticaRequest a = Req (Either String (HabiticaResponse a))
 
-{- RUNNING REQUESTS -}
+-- Running requests
+
 runHabiticaReq :: FromJSON a => HabiticaRequest a -> IO (HabiticaResponse a)
 runHabiticaReq req = do
     -- Add a pause before Habitica requests so the server doesn't choke when more than one
     -- request happens
-    threadDelay 1000000
+    Concurrent.threadDelay 1000000
     -- Do some error handling to prevent the user's API key from getting spit into
     -- the terminal on a failure
     catch (either ParseError id <$> Req.runReq reqConf req) $ return . \case
         VanillaHttpException (HttpExceptionRequest request err) ->
-            let requestApiMasked = request {
+            let
+                requestApiMasked = request {
                     requestHeaders = fmap (\header@(headerName, _) ->
                         if headerName == "x-api-key"
                             then (headerName, "(hidden)")
@@ -109,7 +115,7 @@ runHabiticaReq req = do
                     ) (requestHeaders request)
                 }
             in
-                HttpException (VanillaHttpException (HttpExceptionRequest requestApiMasked err))
+            HttpException (VanillaHttpException (HttpExceptionRequest requestApiMasked err))
 
         otherVanilla@(VanillaHttpException _) ->
             HttpException otherVanilla
@@ -118,7 +124,8 @@ runHabiticaReq req = do
   where
     reqConf = Req.defaultHttpConfig {Req.httpConfigCheckResponse = \_ _ _ -> Nothing}
 
-{- HABITICA REQUESTS -}
+-- Habitica requests
+
 habiticaCreateOrUpdateRequest :: HabiticaHeaders -> HabiticaTask -> HabiticaRequest HabiticaTask
 habiticaCreateOrUpdateRequest (HabiticaHeaders headers) habiticaTask@(HabiticaTask task) =
     toHabiticaRequest id $
@@ -149,7 +156,7 @@ habiticaDeleteTask (HabiticaHeaders headers) uuid =
 data ScoreDirection
     = Up
     | Down
-    deriving (Show, Eq)
+  deriving (Show, Eq)
 
 habiticaScoreTask :: HabiticaHeaders -> UUID -> ScoreDirection -> HabiticaRequest ()
 habiticaScoreTask (HabiticaHeaders headers) uuid dir =

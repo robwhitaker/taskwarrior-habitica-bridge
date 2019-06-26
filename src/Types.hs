@@ -12,19 +12,24 @@ import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
 import           Control.Newtype.Generics  (Newtype)
 import qualified Control.Newtype.Generics  as NT
 
-import           Data.Aeson
-import           Data.Aeson.Types
 import qualified Data.HashMap.Strict       as HM
-import           Data.Maybe                (fromJust, fromMaybe)
+import qualified Data.Maybe                as Maybe
 import           Data.Text                 (Text)
 import qualified Data.Text                 as T
 import           Data.Time                 (UTCTime)
 import qualified Data.Time.Format          as Time
 import qualified Data.UUID                 as UUID
 
+import           Data.Aeson                (FromJSON, Object, ToJSON,
+                                            Value (..), parseJSON, toJSON,
+                                            (.!=), (.:), (.:?), (.=))
+import qualified Data.Aeson                as Aeson
+import           Data.Aeson.Types          (Parser)
+
 import           Network.HTTP.Req          (HttpException)
 
-{- TASK TYPE -}
+-- Task type
+
 data Task status = Task
     { taskHabiticaId :: Maybe UUID
     , taskType       :: TaskType
@@ -53,7 +58,7 @@ data TaskDifficulty
     | Easy
     | Medium
     | Hard
-    deriving (Show, Eq)
+  deriving (Show, Eq)
 
 data TWTaskStatus
     = TWPending
@@ -61,24 +66,24 @@ data TWTaskStatus
     | TWRecurring
     | TWCompleted
     | TWDeleted
-    deriving (Show, Eq)
+  deriving (Show, Eq)
 
 data HTaskStatus
     = HPending
     | HCompleted
     | HDeleted
-    deriving (Show, Eq)
+  deriving (Show, Eq)
 
 data TaskType
     = Habit
     | Daily
     | Todo
     | Reward
-    deriving (Show, Eq)
+  deriving (Show, Eq)
 
 instance FromJSON TaskType where
     parseJSON =
-        withText "task type" $ \s ->
+        Aeson.withText "task type" $ \s ->
             case s :: Text of
                 "habit"  -> return Habit
                 "daily"  -> return Daily
@@ -91,25 +96,21 @@ instance ToJSON TaskType where
 
 newtype UUID =
     UUID UUID.UUID
-    deriving (Show, Eq, Generic)
+  deriving (Show, Eq, Generic)
 
 instance Newtype UUID
 
 instance FromJSON UUID where
     parseJSON =
-        withText "UUID" $
-        maybe (fail "Invalid UUID.") (return . NT.pack) . UUID.fromText
+        Aeson.withText "UUID" $
+            maybe (fail "Invalid UUID.") (return . NT.pack) . UUID.fromText
 
 instance ToJSON UUID where
     toJSON (UUID uuid) = String $ UUID.toText uuid
 
-unsafeUUID :: Text -> UUID
-unsafeUUID uuidStr = UUID $ fromJust $ UUID.fromText uuidStr
+-- Specialized task types for encoding and decoding between
+-- Taskwarrior and Habitica
 
-{- SPECIALIZED TASK TYPES
---
--- For encoding and decoding between Taskwarrior and Habitica
--}
 newtype HabiticaTask =
     HabiticaTask (Task HTaskStatus)
   deriving (Show, Eq, Generic)
@@ -118,7 +119,7 @@ instance Newtype HabiticaTask
 
 instance FromJSON HabiticaTask where
     parseJSON =
-        withObject "habitica task" $ \o ->
+        Aeson.withObject "habitica task" $ \o ->
             fmap NT.pack $ do
                 hId <- Just <$> (o .: "id")
                 type_ <- o .: "type"
@@ -130,8 +131,7 @@ instance FromJSON HabiticaTask where
                             1 -> return Easy
                             1.5 -> return Medium
                             2 -> return Hard
-                            _ ->
-                                fail "Invalid number provided as task difficulty (priority)."
+                            _ -> fail "Invalid number provided as task difficulty (priority)."
                 isCompleted <- o .: "completed"
                 status <-
                     if type_ == Daily
@@ -141,8 +141,8 @@ instance FromJSON HabiticaTask where
                                 then return HPending
                                 else return HCompleted
                         else if isCompleted
-                                 then return HCompleted
-                                 else return HPending
+                                then return HCompleted
+                                else return HPending
                 due <- o .:? "date" >>= text2Time
                 modified <- o .: "updatedAt" >>= textToTime habiticaTimeFormat
                 return $ Task hId type_ text priority status due modified o
@@ -155,7 +155,7 @@ instance FromJSON HabiticaTask where
 
 instance ToJSON HabiticaTask where
     toJSON (HabiticaTask task) =
-        object
+        Aeson.object
             [ "text" .= taskText task
             , "type" .= taskType task
             , "date" .= (timeToText habiticaTimeFormat <$> taskDue task)
@@ -175,30 +175,31 @@ instance Newtype TaskwarriorTask
 
 instance FromJSON TaskwarriorTask where
     parseJSON =
-        withObject "taskwarrior task" $ \o ->
-            fmap NT.pack $
-            Task <$> (o .:? "habitica_uuid") <*> (o .:? "habitica_task_type" .!= Todo) <*>
-            (o .: "description") <*>
-            (o .:? "habitica_difficulty" >>= \difficulty ->
-                 case difficulty :: Maybe Text of
-                     Nothing -> return Easy
-                     Just "trivial" -> return Trivial
-                     Just "easy" -> return Easy
-                     Just "medium" -> return Medium
-                     Just "hard" -> return Hard
-                     _ -> fail "Invalid string provided as task difficulty (priority).") <*>
-            (o .: "status" >>= \status ->
-                 case status :: Text of
-                     "pending"   -> return TWPending :: Parser TWTaskStatus
-                     "waiting"   -> return TWWaiting
-                     "completed" -> return TWCompleted
-                     "deleted"   -> return TWDeleted
-                     "recurring" -> return TWRecurring
-                     _           -> fail "Invalid status.") <*>
-            (o .:? "due" >>=
-             maybe (return Nothing) (fmap Just . textToTime taskwarriorTimeFormat)) <*>
-            (o .: "modified" >>= textToTime taskwarriorTimeFormat) <*>
-            return o
+        Aeson.withObject "taskwarrior task" $ \o ->
+            fmap NT.pack $ Task
+                <$> (o .:? "habitica_uuid")
+                <*> (o .:? "habitica_task_type" .!= Todo)
+                <*> (o .: "description")
+                <*> (o .:? "habitica_difficulty" >>= \difficulty ->
+                        case difficulty :: Maybe Text of
+                            Nothing -> return Easy
+                            Just "trivial" -> return Trivial
+                            Just "easy" -> return Easy
+                            Just "medium" -> return Medium
+                            Just "hard" -> return Hard
+                            _ -> fail "Invalid string provided as task difficulty (priority).")
+                <*> (o .: "status" >>= \status ->
+                        case status :: Text of
+                            "pending"   -> return TWPending :: Parser TWTaskStatus
+                            "waiting"   -> return TWWaiting
+                            "completed" -> return TWCompleted
+                            "deleted"   -> return TWDeleted
+                            "recurring" -> return TWRecurring
+                            _           -> fail "Invalid status.")
+                <*> (o .:? "due" >>=
+                        maybe (return Nothing) (fmap Just . textToTime taskwarriorTimeFormat))
+                <*> (o .: "modified" >>= textToTime taskwarriorTimeFormat)
+                <*> return o
 
 instance ToJSON TaskwarriorTask where
     -- Taskwarrior's "import" functionality removes all fields that
@@ -226,18 +227,18 @@ data HabiticaUserStats = HabiticaUserStats
     } deriving (Show)
 
 instance FromJSON HabiticaUserStats where
-    parseJSON = withObject "Habitica user stats" $ \o -> do
-        stats <- fromMaybe o <$> o .:? "stats"
-        HabiticaUserStats <$>
-            stats .: "hp" <*>
-            stats .: "mp" <*>
-            stats .: "exp" <*>
-            stats .: "gp" <*>
-            stats .: "lvl"
+    parseJSON = Aeson.withObject "Habitica user stats" $ \o -> do
+        stats <- Maybe.fromMaybe o <$> o .:? "stats"
+        HabiticaUserStats
+            <$> stats .: "hp"
+            <*> stats .: "mp"
+            <*> stats .: "exp"
+            <*> stats .: "gp"
+            <*> stats .: "lvl"
 
 instance ToJSON HabiticaUserStats where
     toJSON stats =
-        object
+        Aeson.object
             [ "hp" .= statsHp stats
             , "mp" .= statsMp stats
             , "exp" .= statsExp stats
@@ -246,23 +247,22 @@ instance ToJSON HabiticaUserStats where
             ]
 
 
-newtype ItemDrop = ItemDrop Text
+newtype ItemDrop =
+    ItemDrop Text
   deriving (Show)
 
 instance FromJSON ItemDrop where
-    parseJSON = withObject "item drop" $ \o -> do
+    parseJSON = Aeson.withObject "item drop" $ \o -> do
         dialog <- runMaybeT $
             maybeField "_tmp" o
                 >>= maybeField "drop"
                 >>= maybeField "dialog"
-        maybe
-            empty
-            (return . ItemDrop)
-            dialog
+        maybe empty (return . ItemDrop) dialog
       where
         maybeField txt obj = MaybeT (obj .:? txt)
 
--- These don't really belong here, but they are needed for encoding/decoding time
+-- Encoding and decoding time
+
 habiticaTimeFormat :: String
 habiticaTimeFormat = "%0Y-%m-%dT%T%QZ"
 
@@ -281,10 +281,7 @@ timeToText timeFormat time =
 parseUTCTime :: String -> Text -> Maybe UTCTime
 parseUTCTime format = Time.parseTimeM True Time.defaultTimeLocale format . T.unpack
 
-{- REQUEST TYPES
--
--  Types for working with web requests
--}
+-- Web request types
 
 data ResponseData a = ResponseData
     { resBody      :: a
@@ -298,10 +295,11 @@ instance Functor ResponseData where
 data HabiticaResponse a
     = DataResponse (ResponseData a)
     | ErrorResponse { errKey     :: Text
-                    , errMessage :: Text }
+                    , errMessage :: Text
+                    }
     | ParseError String
     | HttpException HttpException
-    deriving (Show)
+  deriving (Show)
 
 instance Functor HabiticaResponse where
     fmap f (DataResponse val)  = DataResponse (fmap f val)
@@ -311,39 +309,20 @@ instance Functor HabiticaResponse where
 
 instance (FromJSON a) => FromJSON (HabiticaResponse a) where
     parseJSON =
-        withObject "habitica response" $ \o -> do
+        Aeson.withObject "habitica response" $ \o -> do
             success <- o .: "success"
             if success
-                then fmap DataResponse $ ResponseData <$>
-                    o .: "data" <*>
-                    o `maybeParse` "data" <*>
-                    o `maybeParse` "data"
+                then fmap DataResponse $ ResponseData
+                    <$> o .: "data"
+                    <*> o `maybeParse` "data"
+                    <*> o `maybeParse` "data"
                 else ErrorResponse <$> o .: "error" <*> o .: "message"
       where
         maybeParse :: FromJSON a => Object -> Text -> Parser (Maybe a)
         maybeParse obj txt =
             obj .: txt >>= \inJson -> parseJSON inJson <|> return Nothing
 
-{- CHANGE TYPES
--
--  Types for representing changes that need to be made
--}
-data Change
-    = AddToTaskwarrior HabiticaTask
-    | DeleteFromTaskwarrior TaskwarriorTask
-    | AddToHabitica TaskwarriorTask
-    | Update UpdateChange
-    deriving (Show)
+-- Error types
+-- In this case, errors are just strings to give the user on failure.
 
-type HasStatusChange = Bool
-
-data UpdateChange
-    = UpdateHabitica HabiticaTask
-                     HasStatusChange
-    | UpdateTaskwarrior TaskwarriorTask
-    deriving (Show)
-
-{- ARG TYPES -}
-
-data SyncArgs = SyncArgs
-    { syncVerbose :: Bool }
+type Error = String
