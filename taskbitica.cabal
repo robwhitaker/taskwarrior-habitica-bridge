@@ -13,8 +13,8 @@ synopsis:            Sync between Taskwarrior and Habitica.
 build-type:          Simple
 
 extra-source-files:
-    README.md
     CHANGELOG.md
+    README.md
 
 executable taskbitica
   main-is:             Main.hs
@@ -29,27 +29,27 @@ executable taskbitica
                        -Wwarn=unused-local-binds
                        -Wwarn=unused-matches
                        -Wwarn=unused-do-bind
-  other-modules:       Types
-                     , Web
+  other-modules:       App
                      , TaskUtils
                      , Taskwarrior
-                     , App
-  build-depends:       base
-                     , aeson
-                     , text
-                     , time
-                     , req
-                     , process
+                     , Types
+                     , Web
+  build-depends:       aeson
+                     , base
                      , bytestring
-                     , utf8-string
-                     , mtl
-                     , transformers
                      , containers
-                     , unordered-containers
-                     , uuid
-                     , newtype-generics
                      , directory
                      , filepath
                      , http-client
+                     , mtl
+                     , newtype-generics
+                     , process
+                     , req
+                     , text
+                     , time
+                     , transformers
+                     , unordered-containers
+                     , utf8-string
+                     , uuid
   hs-source-dirs:      src
   default-language:    Haskell2010
