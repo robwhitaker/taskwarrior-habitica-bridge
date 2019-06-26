@@ -13,7 +13,6 @@ module App
     , Args(..)
     , Cmd(..)
     , Env(..)
-    , Error
 
     -- * Running App
     , runProgram
