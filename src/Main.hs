@@ -14,9 +14,9 @@ module Main where
 
 import           Control.Exception         (tryJust)
 import           Control.Monad             (foldM_, forM_, guard, void, when)
-import           Control.Monad.Except      (MonadError, liftEither, throwError)
+import           Control.Monad.Except      (liftEither, throwError)
 import           Control.Monad.IO.Class    (MonadIO, liftIO)
-import           Control.Monad.Reader      (MonadReader, asks)
+import           Control.Monad.Reader      (asks)
 
 import           Control.Newtype.Generics  (Newtype, O)
 import qualified Control.Newtype.Generics  as NT
@@ -36,13 +36,15 @@ import           System.Directory          (removeFile)
 import           System.Exit               (exitFailure)
 import           System.IO.Error           (isDoesNotExistError)
 
-import           App                       (App, Args (..), Cmd (..), Env (..),
-                                            Error)
+import           App                       (App, AppError, AppReader, Args (..),
+                                            Cmd (..), Env (..), Error)
 import qualified App
 import           TaskUtils
 import           Taskwarrior               (Taskwarrior (..))
 import           Types
 import           Web
+
+-- Running the program
 
 main :: IO ()
 main = App.runProgram handleError $ \case
@@ -80,21 +82,18 @@ handleError err = do
     putStrLn $ "Error: " <> err
     exitFailure
 
-getHabiticaStatsFromCacheFile :: (MonadReader Env m, MonadIO m) => m (Maybe HabiticaUserStats)
+-- Helper functions
+
+getHabiticaStatsFromCacheFile :: (AppReader m, MonadIO m) => m (Maybe HabiticaUserStats)
 getHabiticaStatsFromCacheFile = do
     dataFile <- asks envHabiticaUserStatsCache
     liftIO $ tryJust (guard . isDoesNotExistError) (decodeFileStrict' dataFile)
         >>= either (const $ return Nothing) return
 
-exitHook :: App ()
-exitHook = do
-    statCache <- asks envHabiticaUserStatsCache
-    liftIO $ tryJust (guard . isDoesNotExistError) (removeFile statCache) >>=
-        const (return ())
-
--- Return a list of taskwarrior tasks:
+{- Return a list of taskwarrior tasks:
 --     First item in the tuple is a list of pending tasks without habitica uuids
 --     Second item in the tuple is a list of all tasks with habitica uuids
+-}
 getTaskwarriorTasks :: App ([TaskwarriorTask], [TaskwarriorTask])
 getTaskwarriorTasks = do
     Taskwarrior{taskExport} <- asks envTaskwarrior
@@ -114,7 +113,50 @@ getHabiticaTasks = do
     -- We don't care about rewards or habits
     return $ mconcat $ fmap resBody [todos, dailies, completed]
 
-responseHandle :: MonadError String m => HabiticaResponse a -> m (ResponseData a)
+fetchStats :: App HabiticaUserStats
+fetchStats = do
+    headers <- asks envHabiticaHeaders
+    (ResponseData _ maybeStats _) <-
+        liftIO (runHabiticaReq (habiticaGetUserStats headers))
+            >>= responseHandle
+    maybe (throwError "Unable to fetch stats for the user.") return maybeStats
+
+getUserStatDiffs :: HabiticaUserStats -> HabiticaUserStats -> [String]
+getUserStatDiffs old new
+    | lvlDiff /= 0 = catMaybes
+        [ if lvlDiff > 0 then
+            Just $ "You leveled up! You are now level " <> show (statsLvl new) <> "!"
+          else
+            Just $ "You lost a level. You are now level " <> show (statsLvl new) <> "."
+        , mkDiffText "hp" statsHp
+        , mkDiffText "mp" statsMp
+        , mkDiffText "gold" statsGp
+        ]
+    | otherwise = catMaybes
+        [ mkDiffText "mp" statsMp
+        , mkDiffText "gold" statsGp
+        , mkDiffText "exp" statsExp
+        ]
+  where
+    lvlDiff = statsLvl new - statsLvl old
+
+    mkDiffText field getter
+        | diff == 0 = Nothing
+        | otherwise =
+            let (dir, punc) = if diff > 0 then ("gained", "!") else ("lost", ".")
+                diffVal = prettyShow (abs diff)
+            in Just $ mconcat
+                [ "You ", dir, " ", diffVal, " ", field, punc
+                , " (current ", field, ": ", prettyShowField new, ")"
+                ]
+      where diff = getter new - getter old
+            rounded n = fromIntegral (round (n * 100) :: Int) / 100
+            prettyShow = show . rounded
+            prettyShowField = prettyShow . getter
+
+-- Updating tasks on Habitica from Taskwarrior
+
+responseHandle :: AppError m => HabiticaResponse a -> m (ResponseData a)
 responseHandle res =
     case res of
         HttpException e ->
@@ -204,10 +246,10 @@ modifyTaskwarriorTask (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask)
     completed = (== TWCompleted)
     pending = (`elem` [TWPending, TWWaiting])
 
-    requireHabiticaId :: MonadError String m => String -> Maybe UUID -> m UUID
+    requireHabiticaId :: AppError m => Error -> Maybe UUID -> m UUID
     requireHabiticaId errMsg = maybe (throwError errMsg) return
 
-    getId :: MonadError String m => m UUID
+    getId :: AppError m => m UUID
     getId = requireHabiticaId
         "Task has no Habitica ID and cannot be updated."
         (taskHabiticaId newTask)
@@ -220,13 +262,7 @@ modifyTaskwarriorTask (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask)
                 >>= responseHandle
         return (twTask, maybeNewStats, maybeItemDrop)
 
-fetchStats :: App HabiticaUserStats
-fetchStats = do
-    headers <- asks envHabiticaHeaders
-    (ResponseData _ maybeStats _) <-
-        liftIO (runHabiticaReq (habiticaGetUserStats headers))
-            >>= responseHandle
-    maybe (throwError "Unable to fetch stats for the user.") return maybeStats
+-- Cli commands
 
 addHook :: App ()
 addHook = do
@@ -269,6 +305,11 @@ modifyHook = do
   where
     printTask = liftIO . putStrLn . B.toString . encode
 
+exitHook :: App ()
+exitHook = do
+    statCache <- asks envHabiticaUserStatsCache
+    liftIO $ tryJust (guard . isDoesNotExistError) (removeFile statCache) >>=
+        const (return ())
 
 sync :: App ()
 sync = do
@@ -394,36 +435,3 @@ sync = do
         putStrLn $ "Habitica Task:    " <> T.unpack (taskText (NT.unpack habiticaTask))
         putStrLn $ "Taskwarrior Task: " <> T.unpack (taskText (NT.unpack taskwarriorTask))
         putStrLn "    Status: Exists on both Habitica and Taskwarrior."
-
-getUserStatDiffs :: HabiticaUserStats -> HabiticaUserStats -> [String]
-getUserStatDiffs old new
-    | lvlDiff /= 0 = catMaybes
-        [ if lvlDiff > 0 then
-            Just $ "You leveled up! You are now level " <> show (statsLvl new) <> "!"
-          else
-            Just $ "You lost a level. You are now level " <> show (statsLvl new) <> "."
-        , mkDiffText "hp" statsHp
-        , mkDiffText "mp" statsMp
-        , mkDiffText "gold" statsGp
-        ]
-    | otherwise = catMaybes
-        [ mkDiffText "mp" statsMp
-        , mkDiffText "gold" statsGp
-        , mkDiffText "exp" statsExp
-        ]
-  where
-    lvlDiff = statsLvl new - statsLvl old
-
-    mkDiffText field getter
-        | diff == 0 = Nothing
-        | otherwise =
-            let (dir, punc) = if diff > 0 then ("gained", "!") else ("lost", ".")
-                diffVal = prettyShow (abs diff)
-            in Just $ mconcat
-                [ "You ", dir, " ", diffVal, " ", field, punc
-                , " (current ", field, ": ", prettyShowField new, ")"
-                ]
-      where diff = getter new - getter old
-            rounded n = fromIntegral (round (n * 100) :: Int) / 100
-            prettyShow = show . rounded
-            prettyShowField = prettyShow . getter
