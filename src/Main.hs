@@ -225,19 +225,21 @@ modifyTaskwarriorTask (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask)
                             return (newTwTask, maybeNewStats, maybeItemDrop)
                     else return (newTwTask, Nothing, Nothing)
 
-            -- When going from Completed to Pending or Waiting, "uncheck" the task
+            -- When going from Completed to Pending or Waiting, update the
+            -- task details if they've changed and then "uncheck" the task
             -- on Habitica
             | completed oldStatus && pending newStatus ->
-                scoreOnHabitica Down
+                updateTaskDetails >>= scoreOnHabitica Down
 
-            -- When going from Pending or Waiting to Completed, "check" the task
+            -- When going from Pending or Waiting to Completed, update the
+            -- task details if they've changed and then "check" the task
             -- on Habitica
             | pending oldStatus && completed newStatus ->
-                scoreOnHabitica Up
+                updateTaskDetails >>= scoreOnHabitica Up
 
             -- The task status didn't change so just update the details
             | otherwise -> do
-                newTwTask <- pushTaskwarriorTask twTask
+                newTwTask <- updateTaskDetails
                 return (newTwTask, Nothing, Nothing)
   where
     onHabitica = (`elem` [TWPending, TWWaiting, TWCompleted])
@@ -248,18 +250,27 @@ modifyTaskwarriorTask (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask)
     requireHabiticaId :: AppError m => Error -> Maybe UUID -> m UUID
     requireHabiticaId errMsg = maybe (throwError errMsg) return
 
-    getId :: AppError m => m UUID
-    getId = requireHabiticaId
+    getId :: AppError m => TaskwarriorTask -> m UUID
+    getId (TaskwarriorTask task) = requireHabiticaId
         "Task has no Habitica ID and cannot be updated."
-        (taskHabiticaId newTask)
+        (taskHabiticaId task)
 
-    scoreOnHabitica dir = do
+    updateTaskDetails :: App TaskwarriorTask
+    updateTaskDetails =
+        -- If details of the task, other than the status, have
+        -- changed, update them on Habitica. Otherwise return
+        -- the task unchanged.
+        if oldTask /= newTask {taskStatus = taskStatus oldTask}
+            then pushTaskwarriorTask twTask
+            else return twTask
+
+    scoreOnHabitica dir task = do
         headers <- asks envHabiticaHeaders
-        hId <- getId
+        hId <- getId task
         (ResponseData _ maybeNewStats maybeItemDrop) <-
             liftIO (runHabiticaReq (habiticaScoreTask headers hId dir))
                 >>= responseHandle
-        return (twTask, maybeNewStats, maybeItemDrop)
+        return (task, maybeNewStats, maybeItemDrop)
 
 -- Cli commands
 
