@@ -8,11 +8,11 @@ let
       retry = self.retry_0_8_0_0;
     };
   };
-  drv = overriddenPackages.callCabal2nix "taskbitica" ./taskbitica.cabal {};
+  drv = overriddenPackages.callCabal2nix "taskwarrior-habitica-bridge" ./taskwarrior-habitica-bridge.cabal {};
 in
   {
-    taskbitica = drv;
-    taskbitica-shell = overriddenPackages.shellFor {
+    taskwarrior-habitica-bridge = drv;
+    taskwarrior-habitica-bridge-shell = overriddenPackages.shellFor {
       packages = p: [drv];
       buildInputs = with overriddenPackages; [
         cabal-install

@@ -1,4 +1,4 @@
-name:                taskbitica
+name:                taskwarrior-habitica-bridge
 version:             0.1.0.0
 license:             MIT
 license-file:        LICENSE
@@ -16,7 +16,7 @@ extra-source-files:
     CHANGELOG.md
     README.md
 
-executable taskbitica
+executable task2habitica
   main-is:             Main.hs
   ghc-options:         -Wall
                        -fwarn-incomplete-uni-patterns

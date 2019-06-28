@@ -1,4 +1,4 @@
-# Revision history for Taskbitica
+# Revision history for Taskwarrior-Habitica Bridge
 
 ## 0.1.0.0 -- YYYY-mm-dd
 

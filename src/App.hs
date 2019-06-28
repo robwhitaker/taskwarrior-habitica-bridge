@@ -47,7 +47,7 @@ minTaskwarriorVersion :: String
 minTaskwarriorVersion = "2.5.0"
 
 envVarName :: String
-envVarName = "TASKBITICA_RUNNING"
+envVarName = "TASK2HABITICA_RUNNING"
 
 -- App monad
 
