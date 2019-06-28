@@ -155,6 +155,8 @@ getUserStatDiffs old new
 
 -- Updating tasks on Habitica from Taskwarrior
 
+type StatResponse a = (a, Maybe HabiticaUserStats, Maybe ItemDrop)
+
 responseHandle :: AppError m => HabiticaResponse a -> m (ResponseData a)
 responseHandle res =
     case res of
@@ -167,23 +169,54 @@ responseHandle res =
                 ("Something went wrong while parsing the response from Habitica: " <> errText)
         DataResponse dataRes -> return dataRes
 
-pushTaskwarriorTask :: TaskwarriorTask -> App TaskwarriorTask
-pushTaskwarriorTask taskwarriorTask@(TaskwarriorTask twTask) = do
+pushTaskwarriorTask' :: TaskwarriorTask -> App (Maybe HabiticaTask, TaskwarriorTask)
+pushTaskwarriorTask' taskwarriorTask@(TaskwarriorTask twTask) = do
     headers <- asks envHabiticaHeaders
-    newHabiticaId <-
+    maybeNewHabiticaTask <-
         case toHabiticaTask taskwarriorTask of
             Nothing -> return Nothing
-            Just htask -> do
-                let req = habiticaCreateOrUpdateRequest headers htask
-                (ResponseData (HabiticaTask Task{taskHabiticaId}) _ _) <-
-                    liftIO (runHabiticaReq req) >>= responseHandle
-                return taskHabiticaId
-    return $ TaskwarriorTask twTask {taskHabiticaId = newHabiticaId}
+            Just htask@(HabiticaTask Task{taskStatus}) ->
+                -- TODO: Maybe the HDeleted constructor should be removed
+                --       as, like TWRecurring, it cannot be represented on
+                --       Habitica. For now, we'll just check if the status
+                --       is deleted and not push the task if it is.
+                if taskStatus == HDeleted
+                    then return Nothing
+                    else do
+                        let req = habiticaCreateOrUpdateRequest headers htask
+                        (ResponseData habiticaTask _ _) <-
+                            liftIO (runHabiticaReq req) >>= responseHandle
+                        return (Just habiticaTask)
+    let habiticaId = maybeNewHabiticaTask >>= taskHabiticaId . NT.unpack
+    return
+        ( maybeNewHabiticaTask
+        , TaskwarriorTask twTask {taskHabiticaId = habiticaId}
+        )
+
+pushTaskwarriorTask :: TaskwarriorTask -> App TaskwarriorTask
+pushTaskwarriorTask = fmap snd . pushTaskwarriorTask'
+
+pushTaskAndCompleteIfNeeded :: TaskwarriorTask -> App (StatResponse TaskwarriorTask)
+pushTaskAndCompleteIfNeeded twTask@(TaskwarriorTask task) = do
+    headers <- asks envHabiticaHeaders
+    (maybeHabiticaTask, newTaskwarriorTask@(TaskwarriorTask newTwTask)) <-
+        pushTaskwarriorTask' twTask
+    let maybeHId = taskHabiticaId newTwTask
+    case (maybeHabiticaTask, maybeHId) of
+        (Just (HabiticaTask hTask), Just hId) ->
+            if taskStatus hTask == HPending && taskStatus task == TWCompleted
+                then do
+                    (ResponseData _ maybeNewStats maybeItemDrop) <-
+                        liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
+                            >>= responseHandle
+                    return (newTaskwarriorTask, maybeNewStats, maybeItemDrop)
+                else return (newTaskwarriorTask, Nothing, Nothing)
+        _ -> return (twTask, Nothing, Nothing)
 
 modifyTaskwarriorTask
     :: TaskwarriorTask
     -> TaskwarriorTask
-    -> App (TaskwarriorTask, Maybe HabiticaUserStats, Maybe ItemDrop)
+    -> App (StatResponse TaskwarriorTask)
 modifyTaskwarriorTask (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask) = do
     headers <- asks envHabiticaHeaders
     case (taskStatus oldTask, taskStatus newTask) of
@@ -213,17 +246,8 @@ modifyTaskwarriorTask (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask)
             -- A task that previously did not exist on Habitica now has a status
             -- that should exist on Habitica, so create a new task on Habitica
             -- and return the Taskwarrior task with the new Habitica ID
-            | notOnHabitica oldStatus && onHabitica newStatus -> do
-                newTwTask@(TaskwarriorTask Task{taskHabiticaId}) <- pushTaskwarriorTask twTask
-                hId <- requireHabiticaId
-                    "Attempt to push task to Habitica resulted in a local task with no UUID."
-                    taskHabiticaId
-                if newStatus == TWCompleted
-                    then do (ResponseData _ maybeNewStats maybeItemDrop) <-
-                                liftIO (runHabiticaReq (habiticaScoreTask headers hId Up))
-                                    >>= responseHandle
-                            return (newTwTask, maybeNewStats, maybeItemDrop)
-                    else return (newTwTask, Nothing, Nothing)
+            | notOnHabitica oldStatus && onHabitica newStatus ->
+                pushTaskAndCompleteIfNeeded twTask
 
             -- When going from Completed to Pending or Waiting, update the
             -- task details if they've changed and then "uncheck" the task
@@ -278,7 +302,30 @@ addHook :: App ()
 addHook = do
     taskJson <- liftIO getLine
     task <- liftEither $ Aeson.eitherDecode (String.fromString taskJson)
-    newTask <- pushTaskwarriorTask task
+
+    -- Only fetch the stats if the task being added is already completed.
+    -- Otherwise, it's a waste of a request.
+    maybeOldStats <-
+        if taskStatus (NT.unpack task) == TWCompleted
+            then Just <$> fetchStats
+            else return Nothing
+
+    (newTask, maybeStats, maybeDrop) <- pushTaskAndCompleteIfNeeded task
+
+    case maybeOldStats of
+        Nothing -> return ()
+        Just oldUserStats -> do
+            maybe
+                (return ())
+                (liftIO . mapM_ putStrLn . getUserStatDiffs oldUserStats)
+                maybeStats
+
+            maybe
+                (return ())
+                (\(ItemDrop itemDropMsg) ->
+                    liftIO $ putStrLn (T.unpack itemDropMsg))
+                maybeDrop
+
     liftIO $ putStrLn $ B.toString $ Aeson.encode newTask
 
 modifyHook :: App ()
@@ -309,7 +356,8 @@ modifyHook = do
 
             case maybeDrop of
                 Nothing -> return ()
-                Just (ItemDrop itemDropMsg) -> liftIO $ putStrLn "" >> putStrLn (T.unpack itemDropMsg)
+                Just (ItemDrop itemDropMsg) ->
+                    liftIO $ putStrLn (T.unpack itemDropMsg)
 
             printTask newerTask
   where
