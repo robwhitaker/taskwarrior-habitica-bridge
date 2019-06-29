@@ -77,10 +77,13 @@ habiticaHeaders :: Text -> Text -> Maybe HabiticaHeaders
 habiticaHeaders textUUID textApiKey =
     mkHeaders <$> UUID.fromText textUUID <*> UUID.fromText textApiKey
   where
+    clientHeader = "cab16cfa-e951-4dc3-a468-1abadc1dd109-TaskwarriorHabiticaBridge"
+
     mkHeaders uuid apiKey =
         HabiticaHeaders $ mconcat
             [ Req.header "x-api-user" (B.toStrict $ String.fromString $ UUID.toString uuid)
             , Req.header "x-api-key" (B.toStrict $ String.fromString $ UUID.toString apiKey)
+            , Req.header "x-client" clientHeader
             ]
 
 -- Type signature for this is weird, so let GHC figure it out
