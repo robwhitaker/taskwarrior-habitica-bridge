@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+if command -v task2habitica >/dev/null; then
+    task2habitica exit
+else
+    echo "Taskwarrior-Habitica Bridge is not installed. Taskwarrior is not syncing with Habitica."
+    exit 0
+fi

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+if command -v task2habitica >/dev/null; then
+    task2habitica add
+else
+    read -r new_task
+    echo "$new_task"
+    echo "Taskwarrior-Habitica Bridge is not installed. Taskwarrior is not syncing with Habitica."
+    exit 0
+fi
