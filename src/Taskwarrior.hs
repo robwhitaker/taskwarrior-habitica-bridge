@@ -23,7 +23,8 @@ import qualified Data.Text                 as T
 import qualified System.Directory          as Directory
 import qualified System.Process            as Process
 
-import           Types                     (Error, TaskwarriorTask)
+import           Types                     (Error, PartialTaskwarriorTask,
+                                            TaskwarriorTask)
 
 data Taskwarrior = Taskwarrior
     { task :: [String] -> IO String
@@ -33,8 +34,12 @@ data Taskwarrior = Taskwarrior
     , taskImport :: TaskwarriorTask -> IO String
     }
 
-requireTaskwarrior :: (MonadError Error m, MonadIO m) => String -> m Taskwarrior
-requireTaskwarrior minVersion = do
+requireTaskwarrior
+    :: (MonadError Error m, MonadIO m)
+    => String
+    -> (forall mm. (MonadError Error mm, MonadIO mm) => PartialTaskwarriorTask -> mm TaskwarriorTask)
+    -> m Taskwarrior
+requireTaskwarrior minVersion taskFinalizer  = do
     maybeTaskCmd <- liftIO $ Directory.findExecutable "task"
     when (Maybe.isNothing maybeTaskCmd)
          (throwError "Taskwarrior not installed or executable not in PATH.")
@@ -48,7 +53,7 @@ requireTaskwarrior minVersion = do
         task'
         taskWithStdin'
         taskGet'
-        taskExport'
+        (taskExport' taskFinalizer)
         taskImport'
 
 task' :: [String] -> IO String
@@ -64,10 +69,15 @@ taskGet' str =
     T.unpack . T.strip . T.pack
         <$> task' ["rc.hooks=off", "_get", str]
 
-taskExport' :: (MonadError Error m, MonadIO m) => [String] -> m [TaskwarriorTask]
-taskExport' filters = do
-    exportedTask <- liftIO $ task' (filters ++ ["export"])
-    liftEither . Aeson.eitherDecode . String.fromString $ exportedTask
+taskExport'
+    :: (MonadError Error m, MonadIO m)
+    => (PartialTaskwarriorTask -> m TaskwarriorTask)
+    -> [String]
+    -> m [TaskwarriorTask]
+taskExport' finalizeTask filters = do
+    exportedTasks <- liftIO $ task' (filters ++ ["export"])
+    partialTasks <- liftEither . Aeson.eitherDecode . String.fromString $ exportedTasks
+    traverse finalizeTask partialTasks
 
 taskImport' :: TaskwarriorTask -> IO String
 taskImport' twTask =

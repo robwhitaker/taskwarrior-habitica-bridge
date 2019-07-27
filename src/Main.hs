@@ -12,27 +12,31 @@
 
 module Main where
 
-import           Control.Exception         (tryJust)
+import           Control.Exception         (IOException, catch, tryJust)
 import           Control.Monad             (foldM_, forM_, guard, void, when)
-import           Control.Monad.Except      (liftEither, throwError)
+import           Control.Monad.Except      (throwError)
 import           Control.Monad.IO.Class    (MonadIO, liftIO)
 import           Control.Monad.Reader      (asks)
 
 import           Control.Newtype.Generics  (Newtype, O)
 import qualified Control.Newtype.Generics  as NT
 
+import           Data.Aeson                ((.:))
 import qualified Data.Aeson                as Aeson
+import qualified Data.Aeson.Types          as Aeson
 import qualified Data.ByteString.Lazy.UTF8 as B
 import           Data.HashMap.Strict       (HashMap)
 import qualified Data.HashMap.Strict       as HM
 import qualified Data.Maybe                as Maybe
 import qualified Data.Set                  as Set
-import qualified Data.String               as String
 import qualified Data.Text                 as T
+import qualified Data.Text.IO              as T
+import qualified Data.Time.Clock           as Time
 import qualified Data.UUID                 as UUID
 
 import qualified System.Directory          as Dir
 import qualified System.Exit               as Exit
+import           System.FilePath           ((<.>), (</>))
 import qualified System.IO.Error           as IOError
 
 import           App                       (App, AppError, AppReader, Args (..),
@@ -301,7 +305,7 @@ modifyTaskwarriorTask (TaskwarriorTask oldTask) twTask@(TaskwarriorTask newTask)
 addHook :: App ()
 addHook = do
     taskJson <- liftIO getLine
-    task <- liftEither $ Aeson.eitherDecode (String.fromString taskJson)
+    task <- App.decodeTaskwarriorJSON taskJson
 
     -- Only fetch the stats if the task being added is already completed.
     -- Otherwise, it's a waste of a request.
@@ -331,11 +335,38 @@ addHook = do
 modifyHook :: App ()
 modifyHook = do
     (oldTaskJson, newTaskJson) <- liftIO $ (,) <$> getLine <*> getLine
-    oldTask <- liftEither $ Aeson.eitherDecode (String.fromString oldTaskJson)
-    newTask <- liftEither $ Aeson.eitherDecode (String.fromString newTaskJson)
+    oldTask <- App.decodeTaskwarriorJSON oldTaskJson
+    newTask <- App.decodeTaskwarriorJSON newTaskJson
+
+    noteHasChanged <-
+        case getTaskwarriorUUID newTask of
+            Nothing -> return False
+            Just uuid -> do
+                noteFile <- getNotePath uuid
+                noteExists <- liftIO $ Dir.doesFileExist noteFile
+                if noteExists
+                    then liftIO $ do
+                        now <- Time.getCurrentTime
+                        modTime <- Dir.getModificationTime noteFile
+                        let timeDiff = Time.diffUTCTime now modTime
+                        print timeDiff
+                        return $ timeDiff <= 60
+                    else
+                        return False
+
+    oldNoteAnnos <-
+        filterNoteAnnotations True (taskAnnotations $ NT.unpack oldTask)
+
+    newNoteAnnos <-
+        filterNoteAnnotations True (taskAnnotations $ NT.unpack newTask)
+
     -- Turn the old and new Taskwarrior tasks into Habitica tasks; if
-    -- they are equal, then we don't need to push anything to Habitica.
+    -- they are equal, their notes haven't changed recently, and their
+    -- note annotations haven't changed, then we don't need to push
+    -- anything to Habitica.
     if toHabiticaTask oldTask == toHabiticaTask newTask
+            && not noteHasChanged
+            && oldNoteAnnos == newNoteAnnos
         then printTask newTask
         else do
             maybeDecodedFile <- getHabiticaStatsFromCacheFile
@@ -400,12 +431,13 @@ sync = do
                              "despite existing in one of the hashmaps. Key was: " <> show key
 
             -- The task exists on Habitica but not in Taskwarrior, so we have to import it to Taskwarrior
-            (Just habiticaTask, Nothing) -> liftIO $ do
-                putStrLn $ "Task: " <> T.unpack (taskText (NT.unpack habiticaTask))
-                putStrLn "    Status: Created on Habitica."
-                putStrLn "    Action: Importing into Taskwarrior."
-                putStrLn ""
-                void $ taskImport (toTaskwarriorTask habiticaTask)
+            (Just habiticaTask, Nothing) -> do
+                liftIO $ do
+                    putStrLn $ "Task: " <> T.unpack (taskText (NT.unpack habiticaTask))
+                    putStrLn "    Status: Created on Habitica."
+                    putStrLn "    Action: Importing into Taskwarrior."
+                    putStrLn ""
+                importAndUpdateNote (toTaskwarriorTask habiticaTask)
                 return stats
 
             -- The task does not exist on Habitica, but it was previously synced with Taskwarrior.
@@ -444,7 +476,7 @@ sync = do
                         return $ Maybe.fromMaybe stats newStats
         ) userStats keys
   where
-    tasksToHM :: (Newtype n, O n ~ Task status) => [n] -> HashMap (Maybe UUID.UUID) n
+    tasksToHM :: (Newtype n, O n ~ Task status annotation) => [n] -> HashMap (Maybe UUID.UUID) n
     tasksToHM =
         foldr (\wrappedTask -> HM.insert
             (NT.unpack <$> taskHabiticaId (NT.unpack wrappedTask)) wrappedTask
@@ -463,7 +495,7 @@ sync = do
                 -- the Taskwarrior task with the Habitica details and import it back
                 -- into Taskwarrior
                 liftIO $ putStrLn "    Action: Habitica task is most recently modified. Updating in Taskwarrior"
-                void $ liftIO $ taskImport (updateTaskwarriorTask habiticaTask taskwarriorTask)
+                importAndUpdateNote (updateTaskwarriorTask habiticaTask taskwarriorTask)
                 return Nothing
             else do
                 -- If the task was modified most recently on Taskwarrior, we can use the
@@ -493,3 +525,82 @@ sync = do
         putStrLn $ "Habitica Task:    " <> T.unpack (taskText (NT.unpack habiticaTask))
         putStrLn $ "Taskwarrior Task: " <> T.unpack (taskText (NT.unpack taskwarriorTask))
         putStrLn "    Status: Exists on both Habitica and Taskwarrior."
+
+importAndUpdateNote :: TaskwarriorTask -> App ()
+importAndUpdateNote twtask@(TaskwarriorTask task) = do
+    Taskwarrior {taskImport} <- asks envTaskwarrior
+    notePrefix <- asks envTaskNotePrefix
+    noteDir <- asks envTaskNoteDir
+    uuid <-
+        case getTaskwarriorUUID twtask of
+            Nothing          -> createUUID twtask
+            Just (UUID uuid) -> return uuid
+
+    -- Update the rawJson to have the new UUID we generated.
+    -- If we did not generate a new UUID, this is basically a log n noop.
+    let newJson = HM.insert "uuid" (Aeson.String (UUID.toText uuid)) (rawJson task)
+
+    -- Remove any note annotations
+    newAnnotations <-
+        filterNoteAnnotations False (taskAnnotations task)
+
+    noteFile <- getNotePath (UUID uuid)
+
+    newTask <- case T.lines (T.strip $ taskNote task) of
+        [] -> liftIO $ do
+            -- There is no note or it is empty, so remove the file if it exists
+            Dir.removeFile noteFile `catch` \(_ :: IOException) -> return ()
+            -- Return the task with the altered annotations
+            return $ TaskwarriorTask task
+                { taskAnnotations = newAnnotations
+                , rawJson = newJson
+                }
+
+        (x:_) -> liftIO $ do
+            -- There is a note, so we create it.
+            -- First create the notes directory if it doesn't exist.
+            Dir.createDirectoryIfMissing True noteDir
+            -- Write the note file
+            T.writeFile noteFile (taskNote task)
+            -- Return the task with an updated annotation
+            currentTime <- Time.getCurrentTime
+            let
+                newAnno = Annotation
+                    { annoEntry = timeToText taskwarriorTimeFormat currentTime
+                    , annoDescription = notePrefix <> " " <> x
+                    }
+            return $ TaskwarriorTask task
+                { taskAnnotations = newAnno : newAnnotations
+                , rawJson = newJson
+                }
+    void $ liftIO $ taskImport newTask
+  where
+    createUUID twTask = do
+        Taskwarrior{taskImport} <- asks envTaskwarrior
+        outtxt <- liftIO $ T.words . T.pack <$> taskImport twTask
+        let uuids = Maybe.mapMaybe UUID.fromText outtxt
+        case uuids of
+            [] ->
+                throwError "Unable to generate a UUID for the imported task."
+            (x:_) ->
+                return x
+
+getNotePath :: UUID -> App FilePath
+getNotePath (UUID uuid) = do
+    noteExtension <- asks envTaskNoteExtension
+    noteDir <- asks envTaskNoteDir
+    return (noteDir </> T.unpack (UUID.toText uuid) <.> noteExtension)
+
+getTaskwarriorUUID :: TaskwarriorTask -> Maybe UUID
+getTaskwarriorUUID =
+    Aeson.parseMaybe (.: "uuid")
+        . rawJson
+        . NT.unpack
+
+filterNoteAnnotations :: Bool -> [Annotation] -> App [Annotation]
+filterNoteAnnotations keepNoteAnnotations annotations = do
+    notePrefix <- asks envTaskNotePrefix
+    return $
+        filter
+            ((==keepNoteAnnotations) . T.isPrefixOf notePrefix . T.strip . annoDescription)
+            annotations

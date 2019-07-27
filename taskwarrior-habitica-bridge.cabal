@@ -18,6 +18,7 @@ extra-source-files:
 
 executable task2habitica
   main-is:             Main.hs
+  default-extensions:          OverloadedStrings
   ghc-options:         -Wall
                        -fwarn-incomplete-uni-patterns
                        -fwarn-tabs

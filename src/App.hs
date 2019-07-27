@@ -20,23 +20,30 @@ module App
     -- * Helper functions
     , getEnvVar
     , setEnvVar
+    , decodeTaskwarriorJSON
     ) where
 
 import           Control.Monad          (void)
-import           Control.Monad.Except   (ExceptT, MonadError, runExceptT,
-                                         throwError)
+import           Control.Monad.Except   (ExceptT, MonadError, liftEither,
+                                         runExceptT, throwError)
 import           Control.Monad.IO.Class (MonadIO, liftIO)
-import           Control.Monad.Reader   (MonadReader, ReaderT, runReaderT)
+import           Control.Monad.Reader   (MonadReader, ReaderT, asks, runReaderT)
 
 import qualified System.Directory       as Dir
 import qualified System.Environment     as Environment
-import           System.FilePath        ((</>))
+import           System.FilePath        ((<.>), (</>))
 
+import qualified Data.Aeson             as Aeson
+import qualified Data.String            as String
+import           Data.Text              (Text)
 import qualified Data.Text              as T
+import qualified Data.Text.IO           as T
+import qualified Data.UUID              as UUID
 
 import           Taskwarrior            (Taskwarrior (..))
 import qualified Taskwarrior
-import           Types                  (Error)
+import           Types                  (Error, PartialTaskwarriorTask (..),
+                                         TaskwarriorTask, UUID (..))
 import           Web                    (HabiticaHeaders)
 import qualified Web
 
@@ -90,6 +97,9 @@ type AppError = MonadError Error
 data Env = Env
     { envArgs                   :: Args
     , envTaskwarrior            :: Taskwarrior
+    , envTaskNoteDir            :: FilePath
+    , envTaskNotePrefix         :: Text
+    , envTaskNoteExtension      :: FilePath
     , envHabiticaHeaders        :: HabiticaHeaders
     , envHabiticaUserStatsCache :: FilePath
     }
@@ -100,10 +110,33 @@ newtype Args = Args
 
 getEnvironment :: (MonadIO m, AppError m) => Args -> m Env
 getEnvironment args = do
-    taskwarrior <- Taskwarrior.requireTaskwarrior minTaskwarriorVersion
+    -- An incomplete instance of Taskwarrior which always reads task
+    -- notes as empty string. This instance only exists to get access
+    -- to taskGet for reading the config file.
+    -- TODO: Make a different type for this
+    incompleteTaskwarrior <-
+        Taskwarrior.requireTaskwarrior
+            minTaskwarriorVersion
+            (\(PartialTaskwarriorTask (_, f)) -> return $ f "")
+    taskNoteDir <- getTaskNoteDir incompleteTaskwarrior
+    taskNoteExtension <- getRCWithDefault incompleteTaskwarrior ".txt" "rc.tasknote.extension"
+    taskNotePrefix <-
+        T.pack <$> getRCWithDefault incompleteTaskwarrior "[tasknote]" "rc.tasknote.prefix"
+    taskwarrior <-
+        Taskwarrior.requireTaskwarrior
+            minTaskwarriorVersion
+            (completePartialTaskwarriorTask taskNoteExtension taskNoteDir)
     headers <- getHabiticaHeaders taskwarrior
     userStatsCache <- getStatsCacheFilePath taskwarrior
-    return $ Env args taskwarrior headers userStatsCache
+    return $
+        Env
+            args
+            taskwarrior
+            taskNoteDir
+            taskNotePrefix
+            taskNoteExtension
+            headers
+            userStatsCache
 
 getArguments :: (MonadIO m, AppError m) => m (Cmd, Args)
 getArguments = do
@@ -131,19 +164,32 @@ getArguments = do
     safeTail (_:rest) = rest
     safeTail []       = []
 
+getRCWithDefault :: MonadIO m => Taskwarrior -> String -> String -> m String
+getRCWithDefault taskwarrior def field = liftIO $ do
+    let Taskwarrior{taskGet} = taskwarrior
+    rawField <- taskGet field
+    if T.null (T.strip (T.pack rawField))
+        then return def
+        else return rawField
+
 getStatsCacheFilePath :: MonadIO m => Taskwarrior -> m FilePath
 getStatsCacheFilePath taskwarrior = liftIO $ do
     let Taskwarrior{taskGet} = taskwarrior
     dataDir <- taskGet "rc.data.location"
     fullPath <- expandPath dataDir
     return (fullPath </> "cached_habitica_stats.json")
-  where
-    expandPath :: FilePath -> IO FilePath
-    expandPath fp =
-        if take 1 fp == "~"
-            then do home <- Dir.getHomeDirectory
-                    return $ home </> dropWhile (=='/') (drop 1 fp)
-            else return fp
+
+getTaskNoteDir :: MonadIO m => Taskwarrior -> m FilePath
+getTaskNoteDir taskwarrior = liftIO $ do
+    dataDir <- getRCWithDefault taskwarrior "~/.task/notes/" "rc.tasknote.location"
+    expandPath dataDir
+
+expandPath :: FilePath -> IO FilePath
+expandPath fp =
+    if take 1 fp == "~"
+        then do home <- Dir.getHomeDirectory
+                return $ home </> dropWhile (=='/') (drop 1 fp)
+        else return fp
 
 getHabiticaHeaders :: (MonadIO m, MonadError String m) => Taskwarrior -> m HabiticaHeaders
 getHabiticaHeaders taskwarrior = do
@@ -154,7 +200,7 @@ getHabiticaHeaders taskwarrior = do
         Nothing -> throwError "Missing or malformed Habitica credentials in taskrc."
         Just headers -> return headers
 
--- Helper functions
+-- Exposed helper functions
 
 getEnvVar :: MonadIO m => m (Maybe String)
 getEnvVar =
@@ -163,3 +209,33 @@ getEnvVar =
 setEnvVar :: MonadIO m => m ()
 setEnvVar =
     liftIO $ Environment.setEnv envVarName "1"
+
+decodeTaskwarriorJSON :: String -> App TaskwarriorTask
+decodeTaskwarriorJSON taskJson = do
+    fileExtension <- asks envTaskNoteExtension
+    fileDir <- asks envTaskNoteDir
+    decodeTaskwarriorJSON' fileExtension fileDir taskJson
+
+-- Helper functions
+
+completePartialTaskwarriorTask
+    :: (MonadError Error m, MonadIO m)
+    => FilePath -> FilePath -> PartialTaskwarriorTask -> m TaskwarriorTask
+completePartialTaskwarriorTask fileExtension fileDir partialTask = do
+    let
+        PartialTaskwarriorTask (UUID uuid, completeTask) = partialTask
+        fileName = T.unpack (UUID.toText uuid)
+        fullPath = fileDir </> fileName <.> fileExtension
+    noteExists <- liftIO $ Dir.doesFileExist fullPath
+    note <-
+        if noteExists
+            then liftIO $ T.readFile fullPath
+            else return ""
+    return (completeTask note)
+
+decodeTaskwarriorJSON'
+    :: (MonadError Error m, MonadIO m)
+    => FilePath -> FilePath -> String -> m TaskwarriorTask
+decodeTaskwarriorJSON' fileExtension fileDir taskJson = do
+    partialTask <- liftEither $ Aeson.eitherDecode $ String.fromString taskJson
+    completePartialTaskwarriorTask fileExtension fileDir partialTask

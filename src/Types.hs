@@ -30,28 +30,32 @@ import           Network.HTTP.Req          (HttpException)
 
 -- Task type
 
-data Task status = Task
-    { taskHabiticaId :: Maybe UUID
-    , taskType       :: TaskType
-    , taskText       :: Text
-    , taskDifficulty :: TaskDifficulty
-    , taskStatus     :: status
-    , taskDue        :: Maybe UTCTime
-    , taskModified   :: UTCTime
-    , rawJson        :: Object
+data Task status annotations = Task
+    { taskHabiticaId  :: Maybe UUID
+    , taskType        :: TaskType
+    , taskText        :: Text
+    , taskNote        :: Text
+    , taskDifficulty  :: TaskDifficulty
+    , taskStatus      :: status
+    , taskDue         :: Maybe UTCTime
+    , taskModified    :: UTCTime
+    , taskAnnotations :: annotations
+    , rawJson         :: Object
     } deriving (Show)
 
 -- The Eq instance ignores the modified field as *when* the tasks changed
 -- is inconsequential to comparing the *content* of the task. It also ignores
 -- the rawJson as that's only stored for the sake of not losing unparsed fields.
-instance Eq status => Eq (Task status) where
+instance (Eq status, Eq annotations) => Eq (Task status annotations) where
     (==) t1 t2 =
         (taskHabiticaId t1 == taskHabiticaId t2) &&
         (taskType t1 == taskType t2) &&
         (taskText t1 == taskText t2) &&
+        (taskNote t1 == taskNote t2) &&
         (taskDifficulty t1 == taskDifficulty t2) &&
         (taskStatus t1 == taskStatus t2) &&
-        (taskDue t1 == taskDue t2)
+        (taskDue t1 == taskDue t2) &&
+        (taskAnnotations t1 == taskAnnotations t2)
 
 data TaskDifficulty
     = Trivial
@@ -112,7 +116,7 @@ instance ToJSON UUID where
 -- Taskwarrior and Habitica
 
 newtype HabiticaTask =
-    HabiticaTask (Task HTaskStatus)
+    HabiticaTask (Task HTaskStatus ())
   deriving (Show, Eq, Generic)
 
 instance Newtype HabiticaTask
@@ -124,6 +128,7 @@ instance FromJSON HabiticaTask where
                 hId <- Just <$> (o .: "id")
                 type_ <- o .: "type"
                 text <- o .: "text"
+                note <- o .: "notes"
                 priority <-
                     o .: "priority" >>= \n ->
                         case n :: Double of
@@ -145,7 +150,7 @@ instance FromJSON HabiticaTask where
                                 else return HPending
                 due <- o .:? "date" >>= text2Time
                 modified <- o .: "updatedAt" >>= textToTime habiticaTimeFormat
-                return $ Task hId type_ text priority status due modified o
+                return $ Task hId type_ text note priority status due modified () o
       where
         text2Time Nothing     = return Nothing
         -- Because sometimes Habitica likes to represent "no time" as
@@ -157,6 +162,7 @@ instance ToJSON HabiticaTask where
     toJSON (HabiticaTask task) =
         Aeson.object
             [ "text" .= taskText task
+            , "notes" .= taskNote task
             , "type" .= taskType task
             , "date" .= (timeToText habiticaTimeFormat <$> taskDue task)
             , "priority" .=
@@ -167,39 +173,69 @@ instance ToJSON HabiticaTask where
                   Hard    -> Number 2
             ]
 
+data Annotation = Annotation
+    { annoEntry       :: Text -- technically a date, but we don't care about it
+    , annoDescription :: Text
+    }
+  deriving (Show, Eq)
+
+instance FromJSON Annotation where
+    parseJSON =
+        Aeson.withObject "annotation" $ \o ->
+            Annotation
+                <$> (o .: "entry")
+                <*> (o .: "description")
+
+instance ToJSON Annotation where
+    toJSON annotation =
+        Aeson.object
+            [ "entry" .= annoEntry annotation
+            , "description" .= annoDescription annotation
+            ]
+
 newtype TaskwarriorTask =
-    TaskwarriorTask (Task TWTaskStatus)
+    TaskwarriorTask (Task TWTaskStatus [Annotation])
   deriving (Show, Eq, Generic)
 
 instance Newtype TaskwarriorTask
 
-instance FromJSON TaskwarriorTask where
+newtype PartialTaskwarriorTask =
+    PartialTaskwarriorTask (UUID, Text -> TaskwarriorTask)
+
+instance FromJSON PartialTaskwarriorTask where
     parseJSON =
-        Aeson.withObject "taskwarrior task" $ \o ->
-            fmap NT.pack $ Task
-                <$> (o .:? "habitica_uuid")
-                <*> (o .:? "habitica_task_type" .!= Todo)
-                <*> (o .: "description")
-                <*> (o .:? "habitica_difficulty" >>= \difficulty ->
-                        case difficulty :: Maybe Text of
-                            Nothing -> return Easy
-                            Just "trivial" -> return Trivial
-                            Just "easy" -> return Easy
-                            Just "medium" -> return Medium
-                            Just "hard" -> return Hard
-                            _ -> fail "Invalid string provided as task difficulty (priority).")
-                <*> (o .: "status" >>= \status ->
-                        case status :: Text of
-                            "pending"   -> return TWPending :: Parser TWTaskStatus
-                            "waiting"   -> return TWWaiting
-                            "completed" -> return TWCompleted
-                            "deleted"   -> return TWDeleted
-                            "recurring" -> return TWRecurring
-                            _           -> fail "Invalid status.")
-                <*> (o .:? "due" >>=
-                        maybe (return Nothing) (fmap Just . textToTime taskwarriorTimeFormat))
-                <*> (o .: "modified" >>= textToTime taskwarriorTimeFormat)
-                <*> return o
+        Aeson.withObject "taskwarrior task" $ \o -> do
+            hId <- o .:? "habitica_uuid"
+            type' <- o .:? "habitica_task_type" .!= Todo
+            text <- o .: "description"
+            difficulty <- o .:? "habitica_difficulty" >>= \difficulty ->
+                case difficulty :: Maybe Text of
+                    Nothing -> return Easy
+                    Just "trivial" -> return Trivial
+                    Just "easy" -> return Easy
+                    Just "medium" -> return Medium
+                    Just "hard" -> return Hard
+                    _ -> fail "Invalid string provided as task difficulty (priority)."
+            status <- o .: "status" >>= \status ->
+                case status :: Text of
+                    "pending"   -> return TWPending :: Parser TWTaskStatus
+                    "waiting"   -> return TWWaiting
+                    "completed" -> return TWCompleted
+                    "deleted"   -> return TWDeleted
+                    "recurring" -> return TWRecurring
+                    _           -> fail "Invalid status."
+            due <- o .:? "due" >>=
+                maybe (return Nothing) (fmap Just . textToTime taskwarriorTimeFormat)
+            modified <- o .: "modified" >>= textToTime taskwarriorTimeFormat
+            annotations <- o .:? "annotations" >>=
+                maybe (return []) (traverse parseJSON)
+            let
+                completeTask note =
+                    TaskwarriorTask $
+                        Task hId type' text note difficulty status due modified annotations o
+            fmap PartialTaskwarriorTask $ (,)
+                <$> (o .: "uuid")
+                <*> return completeTask
 
 instance ToJSON TaskwarriorTask where
     -- Taskwarrior's "import" functionality removes all fields that
@@ -215,6 +251,7 @@ instance ToJSON TaskwarriorTask where
                 , "habitica_difficulty" .= (String . T.toLower . T.pack . show . taskDifficulty) task
                 , "status" .= (String . T.drop 2 . T.toLower . T.pack . show . taskStatus) task
                 , "due" .= (timeToText taskwarriorTimeFormat <$> taskDue task)
+                , "annotations" .= taskAnnotations task
                 ]
         oldObj = rawJson task
 
