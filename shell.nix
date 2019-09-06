@@ -1,3 +1,13 @@
-(import ./. {
+let
   pkgs = (import ./pinned-packages.nix).pkgs1903;
-}).taskwarrior-habitica-bridge-shell
+  drv = import ./. { inherit pkgs; };
+in
+  pkgs.haskellPackages.shellFor {
+    packages = p: [drv];
+    buildInputs = with pkgs.haskellPackages; [
+      cabal-install
+      ghcid
+      stylish-haskell
+      hlint
+    ];
+  }
