@@ -1,4 +1,6 @@
-{ compiler ? "ghc863", pkgs ? import <nixpkgs> {} }:
+{ compiler ? "ghc864"
+, pkgs ? (import ./pinned-packages.nix).pkgs1903
+}:
 
 let
   haskellPackages = pkgs.haskell.packages.${compiler};
