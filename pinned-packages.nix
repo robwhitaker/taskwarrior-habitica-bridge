@@ -1,8 +1,9 @@
 let
-  pkgs1903 = fetchTarball {
-    url = https://github.com/NixOS/nixpkgs/archive/19.03.tar.gz;
-    sha256 = "0q2m2qhyga9yq29yz90ywgjbn9hdahs7i8wwlq7b55rdbyiwa5dy";
+  pkgs1909Beta = fetchTarball {
+    url = https://github.com/NixOS/nixpkgs/archive/19.09-beta.tar.gz;
+    sha256 = "0fplfm2zx4vk7gs8bdcxnvzkdmpx2w0llqwf8475z9dz9cl132rm";
   };
 in
-  { pkgs1903 = import pkgs1903 {};
+  {
+    pkgs1909 = import pkgs1909Beta {};
   }

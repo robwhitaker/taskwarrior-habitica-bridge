@@ -1,5 +1,5 @@
 let
-  pkgs = (import ./pinned-packages.nix).pkgs1903;
+  pkgs = (import ./pinned-packages.nix).pkgs1909;
   drv = import ./. { inherit pkgs; };
 in
   pkgs.haskellPackages.shellFor {
