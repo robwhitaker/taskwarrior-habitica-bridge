@@ -14,15 +14,11 @@ Sync Taskwarrior tasks with Habitica (and _vice versa_).
 ### Dependencies
 
 - [Nix](https://nixos.org/nix/)
-- Cabal (TODO: update with Nix-only install)
 
-### Compiling the program
+### Installing the program
 
 1. If you don't have the Nix package manager installed, install it now: `curl https://nixos.org/nix/install | sh`
-2. Clone this repository: `git clone https://github.com/robwhitaker/taskwarrior-habitica-bridge.git`
-3. `cd` into the project folder: `cd taskwarrior-habitica-bridge`
-4. Build the project: `cabal --enable-nix v1-configure && cabal --enable-nix v1-build`
-5. The compiled executable will be located at `dist/build/task2habitica/task2habitica`. Put this executable somewhere in your PATH.
+2. Install via the setup script: `curl https://raw.githubusercontent.com/robwhitaker/taskwarrior-habitica-bridge/master/setup.sh | sh`
 
 ### Installing the hooks
 
