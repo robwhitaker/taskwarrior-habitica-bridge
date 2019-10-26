@@ -27,6 +27,7 @@ import qualified Data.Aeson.Types          as Aeson
 import qualified Data.ByteString.Lazy.UTF8 as B
 import           Data.HashMap.Strict       (HashMap)
 import qualified Data.HashMap.Strict       as HM
+import qualified Data.List                 as List
 import qualified Data.Maybe                as Maybe
 import qualified Data.Set                  as Set
 import qualified Data.Text                 as T
@@ -87,7 +88,7 @@ handleError err = do
 
 -- Helper functions
 
-getHabiticaStatsFromCacheFile :: (AppReader m, MonadIO m) => m (Maybe HabiticaUserStats)
+getHabiticaStatsFromCacheFile :: (AppReader m, MonadIO m) => m (Maybe HabiticaUserStatsCache)
 getHabiticaStatsFromCacheFile = do
     dataFile <- asks envHabiticaUserStatsCache
     liftIO $ tryJust (guard . IOError.isDoesNotExistError) (Aeson.decodeFileStrict' dataFile)
@@ -124,37 +125,76 @@ fetchStats = do
             >>= responseHandle
     maybe (throwError "Unable to fetch stats for the user.") return maybeStats
 
-getUserStatDiffs :: HabiticaUserStats -> HabiticaUserStats -> [String]
-getUserStatDiffs old new
-    | lvlDiff /= 0 = Maybe.catMaybes
-        [ if lvlDiff > 0 then
-            Just $ "You leveled up! You are now level " <> show (statsLvl new) <> "!"
-          else
-            Just $ "You lost a level. You are now level " <> show (statsLvl new) <> "."
-        , mkDiffText "hp" statsHp
-        , mkDiffText "mp" statsMp
-        , mkDiffText "gold" statsGp
-        ]
-    | otherwise = Maybe.catMaybes
-        [ mkDiffText "mp" statsMp
-        , mkDiffText "gold" statsGp
-        , mkDiffText "exp" statsExp
-        ]
+getUserStatDiffs :: HabiticaUserStatsCache -> [String]
+getUserStatDiffs statsCache
+    | old == new =
+        drops
+    | otherwise =
+        mconcat
+            (Maybe.catMaybes
+            $ List.intersperse (Just " | ")
+            $ filter Maybe.isJust
+                [ mkDiffText "HP" statsHp statsMaxHp
+                , mkDiffText "MP" statsMp statsMaxMp
+                , if lvlDiff == 0
+                    then mkDiffText "Exp" statsExp statsNextLvlExp
+                    else Nothing
+                , mkDiffText "Gold" statsGp (const Nothing)
+                , lvlChangeText
+                ])
+        : drops
   where
+    old = cacheOld statsCache
+    new = Maybe.fromMaybe (cacheOld statsCache) (cacheCurrent statsCache)
+    drops = List.reverse (T.unpack <$> cacheDrops statsCache)
     lvlDiff = statsLvl new - statsLvl old
 
-    mkDiffText field getter
+    lvlChangeText
+        | lvlDiff > 0 =
+            Just $ mconcat
+                [ "LEVEL UP! ("
+                , show (statsLvl old)
+                , "->"
+                , show (statsLvl new)
+                , ")"
+                ]
+        | lvlDiff < 0 =
+            Just $ mconcat
+                [ "LEVEL LOST! ("
+                , show (statsLvl old)
+                , "->"
+                , show (statsLvl new)
+                , ")"
+                ]
+        | otherwise =
+            Nothing
+
+    mkDiffText field getter maxGetter
         | diff == 0 = Nothing
         | otherwise =
-            let (dir, punc) = if diff > 0 then ("gained", "!") else ("lost", ".")
+            let dir = if diff > 0 then "+" else "-"
                 diffVal = prettyShow (abs diff)
             in Just $ mconcat
-                [ "You ", dir, " ", diffVal, " ", field, punc
-                , " (current ", field, ": ", prettyShowField new, ")"
-                ]
+                ([ field
+                , ":"
+                , dir
+                , diffVal
+                , "("
+                , prettyShowField new
+                ] <>
+                (case maxGetter old of
+                    Nothing -> []
+                    Just val ->
+                        [ "/"
+                        , show val
+                        ]) <>
+                [ ")" ])
       where diff = getter new - getter old
-            rounded n = fromIntegral (round (n * 100) :: Int) / 100
-            prettyShow = show . rounded
+            prettyShow n =
+                if n < 1 then
+                    show $ fromIntegral (round (n * 100) :: Int) / 100
+                else
+                    show (round n)
             prettyShowField = prettyShow . getter
 
 -- Updating tasks on Habitica from Taskwarrior
@@ -309,26 +349,34 @@ addHook = do
 
     -- Only fetch the stats if the task being added is already completed.
     -- Otherwise, it's a waste of a request.
-    maybeOldStats <-
+    maybeStatsCache <-
         if taskStatus (NT.unpack task) == TWCompleted
-            then Just <$> fetchStats
+            then fmap Just $
+                HabiticaUserStatsCache
+                    <$> fetchStats
+                    <*> return Nothing
+                    <*> return []
             else return Nothing
 
     (newTask, maybeStats, maybeDrop) <- pushTaskAndCompleteIfNeeded task
 
-    case maybeOldStats of
+    case maybeStatsCache of
         Nothing -> return ()
-        Just oldUserStats -> do
-            maybe
-                (return ())
-                (liftIO . mapM_ putStrLn . getUserStatDiffs oldUserStats)
-                maybeStats
+        Just statsCache -> do
+            let
+                newStatsCache = statsCache
+                    { cacheCurrent = maybeStats
+                    , cacheDrops =
+                        maybe
+                            (cacheDrops statsCache)
+                            (\(ItemDrop itemDropMsg) ->
+                                itemDropMsg : cacheDrops statsCache)
+                            maybeDrop
 
-            maybe
-                (return ())
-                (\(ItemDrop itemDropMsg) ->
-                    liftIO $ putStrLn (T.unpack itemDropMsg))
-                maybeDrop
+                    }
+
+            dataFile <- asks envHabiticaUserStatsCache
+            liftIO $ Aeson.encodeFile dataFile newStatsCache
 
     liftIO $ putStrLn $ B.toString $ Aeson.encode newTask
 
@@ -371,24 +419,30 @@ modifyHook = do
         else do
             maybeDecodedFile <- getHabiticaStatsFromCacheFile
 
-            oldUserStats <- case maybeDecodedFile of
-                Nothing    -> fetchStats
-                Just stats -> return stats
+            statsCache <- case maybeDecodedFile of
+                Nothing    ->
+                    HabiticaUserStatsCache
+                        <$> fetchStats
+                        <*> return Nothing
+                        <*> return []
+                Just sCache -> return sCache
 
             (newerTask, maybeStats, maybeDrop) <- modifyTaskwarriorTask oldTask newTask
 
-            case maybeStats of
-                Nothing -> return ()
-                Just newStats -> do
-                    dataFile <- asks envHabiticaUserStatsCache
-                    liftIO $ do
-                        Aeson.encodeFile dataFile newStats
-                        mapM_ putStrLn (getUserStatDiffs oldUserStats newStats)
+            let
+                newDrops =
+                    case maybeDrop of
+                        Nothing -> cacheDrops statsCache
+                        Just (ItemDrop itemDropMsg) ->
+                            itemDropMsg : cacheDrops statsCache
 
-            case maybeDrop of
-                Nothing -> return ()
-                Just (ItemDrop itemDropMsg) ->
-                    liftIO $ putStrLn (T.unpack itemDropMsg)
+                newStatsCache = statsCache
+                    { cacheCurrent = maybeStats
+                    , cacheDrops = newDrops
+                    }
+
+            dataFile <- asks envHabiticaUserStatsCache
+            liftIO $ Aeson.encodeFile dataFile newStatsCache
 
             printTask newerTask
   where
@@ -396,9 +450,15 @@ modifyHook = do
 
 exitHook :: App ()
 exitHook = do
-    statCache <- asks envHabiticaUserStatsCache
-    liftIO $ tryJust (guard . IOError.isDoesNotExistError) (Dir.removeFile statCache) >>=
-        const (return ())
+    maybeStatsCache <- getHabiticaStatsFromCacheFile
+    case maybeStatsCache of
+        Nothing -> return ()
+        Just statsCache -> do
+            statsCachePath <- asks envHabiticaUserStatsCache
+            liftIO $ do
+                mapM_ putStrLn (getUserStatDiffs statsCache)
+                tryJust (guard . IOError.isDoesNotExistError)
+                    (Dir.removeFile statsCachePath) >>= const (return ())
 
 sync :: App ()
 sync = do
@@ -506,17 +566,21 @@ sync = do
                     modifyTaskwarriorTask (toTaskwarriorTask habiticaTask) taskwarriorTask
                 void $ liftIO $ taskImport newTwTask
 
-                case maybeStats of
-                    Nothing -> return ()
-                    Just newStats -> liftIO $
-                        mapM_
-                            (putStrLn . ("    " <>))
-                            (getUserStatDiffs currentStats newStats)
+                let
+                    statsCache =
+                        HabiticaUserStatsCache
+                            currentStats
+                            maybeStats
+                            (maybe
+                                []
+                                (\(ItemDrop itemDropMsg) ->
+                                    ["    " <> itemDropMsg])
+                                maybeDrop)
 
-                case maybeDrop of
-                    Nothing -> return ()
-                    Just (ItemDrop itemDropMsg) -> liftIO $
-                        putStrLn ("    " <> T.unpack itemDropMsg)
+
+                liftIO $ mapM_
+                    (putStrLn . ("    " <>))
+                    (getUserStatDiffs statsCache)
 
                 return maybeStats
 

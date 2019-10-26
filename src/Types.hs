@@ -256,20 +256,26 @@ instance ToJSON TaskwarriorTask where
         oldObj = rawJson task
 
 data HabiticaUserStats = HabiticaUserStats
-    { statsHp  :: Double
-    , statsMp  :: Double
-    , statsExp :: Double
-    , statsGp  :: Double
-    , statsLvl :: Int
-    } deriving (Show)
+    { statsHp         :: Double
+    , statsMaxHp      :: Maybe Int
+    , statsMp         :: Double
+    , statsMaxMp      :: Maybe Int
+    , statsExp        :: Double
+    , statsNextLvlExp :: Maybe Int
+    , statsGp         :: Double
+    , statsLvl        :: Int
+    } deriving (Show, Eq)
 
 instance FromJSON HabiticaUserStats where
     parseJSON = Aeson.withObject "Habitica user stats" $ \o -> do
         stats <- Maybe.fromMaybe o <$> o .:? "stats"
         HabiticaUserStats
             <$> stats .: "hp"
+            <*> stats .:? "maxHealth"
             <*> stats .: "mp"
+            <*> stats .:? "maxMP"
             <*> stats .: "exp"
+            <*> stats .:? "toNextLevel"
             <*> stats .: "gp"
             <*> stats .: "lvl"
 
@@ -277,12 +283,35 @@ instance ToJSON HabiticaUserStats where
     toJSON stats =
         Aeson.object
             [ "hp" .= statsHp stats
+            , "maxHealth" .= statsMaxHp stats
             , "mp" .= statsMp stats
+            , "maxMP" .= statsMaxMp stats
             , "exp" .= statsExp stats
+            , "toNextLevel" .= statsNextLvlExp stats
             , "gp" .= statsGp stats
             , "lvl" .= statsLvl stats
             ]
 
+data HabiticaUserStatsCache = HabiticaUserStatsCache
+    { cacheOld     :: HabiticaUserStats
+    , cacheCurrent :: Maybe HabiticaUserStats
+    , cacheDrops   :: [Text]
+    } deriving (Show)
+
+instance FromJSON HabiticaUserStatsCache where
+    parseJSON = Aeson.withObject "Habitica user stats cache" $ \o ->
+        HabiticaUserStatsCache
+            <$> o .: "old"
+            <*> o .: "current"
+            <*> o .: "drops"
+
+instance ToJSON HabiticaUserStatsCache where
+    toJSON statsCache =
+        Aeson.object
+            [ "old" .= cacheOld statsCache
+            , "current" .= cacheCurrent statsCache
+            , "drops" .= cacheDrops statsCache
+            ]
 
 newtype ItemDrop =
     ItemDrop Text
