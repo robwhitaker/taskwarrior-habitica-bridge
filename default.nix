@@ -1,9 +1,12 @@
-{ compiler ? "ghc865"
-, pkgs ? (import ./pinned-packages.nix).pkgs1909
+{ compiler ? null
+, pkgs ? import <nixpkgs> {}
 }:
 
 let
-  haskellPackages = pkgs.haskell.packages.${compiler};
+  haskellPackages =
+    if builtins.isNull compiler
+      then pkgs.haskellPackages
+      else pkgs.haskell.packages.${compiler};
   overriddenPackages = haskellPackages.override {
     overrides = self: super: {}; # Overrides here if necessary
   };
