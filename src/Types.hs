@@ -12,7 +12,7 @@ import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
 import           Control.Newtype.Generics  (Newtype)
 import qualified Control.Newtype.Generics  as NT
 
-import qualified Data.HashMap.Strict       as HM
+import qualified Data.Aeson.KeyMap         as KM
 import qualified Data.Maybe                as Maybe
 import           Data.Text                 (Text)
 import qualified Data.Text                 as T
@@ -20,7 +20,7 @@ import           Data.Time                 (UTCTime)
 import qualified Data.Time.Format          as Time
 import qualified Data.UUID                 as UUID
 
-import           Data.Aeson                (FromJSON, Object, ToJSON,
+import           Data.Aeson                (FromJSON, Key, Object, ToJSON,
                                             Value (..), parseJSON, toJSON,
                                             (.!=), (.:), (.:?), (.=))
 import qualified Data.Aeson                as Aeson
@@ -241,10 +241,10 @@ instance ToJSON TaskwarriorTask where
     -- Taskwarrior's "import" functionality removes all fields that
     -- are not included in the JSON, so by filtering out Null, we
     -- effectively remove the field
-    toJSON (TaskwarriorTask task) = Object $ HM.filter (/= Null) (HM.union newObj oldObj)
+    toJSON (TaskwarriorTask task) = Object $ KM.filter (/= Null) (KM.union newObj oldObj)
       where
         newObj =
-            HM.fromList
+            KM.fromList
                 [ "description" .= taskText task
                 , "habitica_task_type" .= taskType task
                 , "habitica_uuid" .= taskHabiticaId task
@@ -384,7 +384,7 @@ instance (FromJSON a) => FromJSON (HabiticaResponse a) where
                     <*> o `maybeParse` "data"
                 else ErrorResponse <$> o .: "error" <*> o .: "message"
       where
-        maybeParse :: FromJSON a => Object -> Text -> Parser (Maybe a)
+        maybeParse :: FromJSON a => Object -> Key -> Parser (Maybe a)
         maybeParse obj txt =
             obj .: txt >>= \inJson -> parseJSON inJson <|> return Nothing
 

@@ -23,6 +23,7 @@ import qualified Control.Newtype.Generics  as NT
 
 import           Data.Aeson                ((.:))
 import qualified Data.Aeson                as Aeson
+import qualified Data.Aeson.KeyMap         as KM
 import qualified Data.Aeson.Types          as Aeson
 import qualified Data.ByteString.Lazy.UTF8 as B
 import           Data.HashMap.Strict       (HashMap)
@@ -602,7 +603,7 @@ importAndUpdateNote twtask@(TaskwarriorTask task) = do
 
     -- Update the rawJson to have the new UUID we generated.
     -- If we did not generate a new UUID, this is basically a log n noop.
-    let newJson = HM.insert "uuid" (Aeson.String (UUID.toText uuid)) (rawJson task)
+    let newJson = KM.insert "uuid" (Aeson.String (UUID.toText uuid)) (rawJson task)
 
     -- Remove any note annotations
     newAnnotations <-

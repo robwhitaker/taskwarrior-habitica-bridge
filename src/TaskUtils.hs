@@ -15,7 +15,7 @@ import           Control.Newtype.Generics (Newtype, O)
 import qualified Control.Newtype.Generics as NT
 
 import           Data.Aeson.Types         (Object)
-import qualified Data.HashMap.Strict      as HM
+import qualified Data.Aeson.KeyMap        as KM
 import qualified Data.Maybe               as Maybe
 
 import           Types
@@ -31,7 +31,7 @@ convertTask f task json =
 -- Specific task conversions
 
 toHabiticaTask :: TaskwarriorTask -> Maybe HabiticaTask
-toHabiticaTask task = convertTask statusFixer task HM.empty
+toHabiticaTask task = convertTask statusFixer task KM.empty
   where
     statusFixer :: Task TWTaskStatus [Annotation] -> Maybe (Task HTaskStatus ())
     statusFixer inTask =
@@ -47,7 +47,7 @@ toHabiticaTask task = convertTask statusFixer task HM.empty
         fmap (\t -> t { taskAnnotations = () }) newTask
 
 toTaskwarriorTask :: HabiticaTask -> TaskwarriorTask
-toTaskwarriorTask task = Maybe.fromJust $ convertTask statusFixer task HM.empty
+toTaskwarriorTask task = Maybe.fromJust $ convertTask statusFixer task KM.empty
   where
     statusFixer :: Task HTaskStatus () -> Maybe (Task TWTaskStatus [Annotation])
     statusFixer inTask =
