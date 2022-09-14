@@ -26,7 +26,20 @@ Sync Taskwarrior tasks with Habitica (and _vice versa_).
 
 ### Adding Habitica UDAs to Taskwarrior
 
-1. Include `habitica_udas.rc` (TODO: add rc file to repo) in your `.taskrc` file: `include path/to/habitica_udas.rc`
+Some UDAs are needed to represent Habitica types. Add the following UDAs to your `.taskrc` file:
+
+```
+uda.habitica_uuid.label=Habitica UUID
+uda.habitica_uuid.type=string
+
+uda.habitica_difficulty.label=Habitica Difficulty
+uda.habitica_difficulty.type=string
+uda.habitica_difficulty.values=trivial,easy,medium,hard
+
+uda.habitica_task_type.label=Habitica Task Type
+uda.habitica_task_type.type=string
+uda.habitica_task_type.values=daily,todo
+```
 
 ### Providing Habitica credentials
 
